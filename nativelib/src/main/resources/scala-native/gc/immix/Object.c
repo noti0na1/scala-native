@@ -82,10 +82,7 @@ void Object_Mark(Heap *heap, Object *object, ObjectMeta *objectMeta) {
         LineMeta *firstLineMeta = Heap_LineMetaForWord(heap, (word_t *)object);
         LineMeta *lastLineMeta = Heap_LineMetaForWord(heap, lastWord);
         assert(firstLineMeta <= lastLineMeta);
-        for (LineMeta *lineMeta = firstLineMeta; lineMeta <= lastLineMeta;
-             lineMeta++) {
-            Line_Mark(lineMeta);
-        }
+        Line_MarkRange(firstLineMeta, lastLineMeta);
     }
 }
 
