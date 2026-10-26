@@ -18,6 +18,8 @@ The following **environment** variables will be used for all GCs. They can go fr
 
 The GC_INITIAL_HEAP_SIZE and GC_MAXIMUM_HEAP_SIZE are ignored by None GC when multi-threading is enabled and GC_THREAD_HEAP_BLOCK_SIZE is used instead. See the None GC section below for details.
 
+In a build with AddressSanitizer (`withSanitizer(Sanitizer.AddressSanitizer)`), the runtime turns off the sanitizer's `detect_stack_use_after_return`, which the sanitizer enables by default on Linux. That check moves the locals whose address is taken to a stack of the sanitizer's own, which no collector scans. A program whose `ASAN_OPTIONS` turns it on does not start.
+
 ## Compile Time Memory Settings
 
 The GC_INITIAL_HEAP_SIZE, GC_MAXIMUM_HEAP_SIZE and for None GC the GC_THREAD_HEAP_BLOCK_SIZE can be set at **compile time** by using **defines** in the build. Refer to the None GC section below for details about GC_THREAD_HEAP_BLOCK_SIZE.
