@@ -279,6 +279,9 @@ static size_t sigHandlerStackSize() {
 #endif
     return size;
 }
+// The thread's alternate signal stack before the runtime's, restored at exit
+static SN_ThreadLocal stack_t previousSignalStack;
+
 static void setupSignalHandlerAltstack() {
     stack_t handlerStack = {};
     handlerStack.ss_size =
@@ -290,7 +293,7 @@ static void setupSignalHandlerAltstack() {
         exit(EXIT_FAILURE);
     }
     handlerStack.ss_flags = 0;
-    if (sigaltstack(&handlerStack, NULL) == -1) {
+    if (sigaltstack(&handlerStack, &previousSignalStack) == -1) {
         perror(SN_ERROR_MSG("StackOverflowHandler failed to set alt stack"));
         exit(EXIT_FAILURE);
     }
@@ -356,6 +359,15 @@ void scalanative_StackOverflowGuards_close() {
 #else
     unprotectStackGuardPage();
     if (currentThreadInfo.signalHandlerStack) {
+        // Unregister the stack before freeing it, and restore the previous
+        // one, which AddressSanitizer unmaps at thread exit.
+        stack_t previous = previousSignalStack;
+        if (previous.ss_sp == NULL || (previous.ss_flags & SS_DISABLE)) {
+            previous.ss_sp = NULL;
+            previous.ss_size = 0;
+            previous.ss_flags = SS_DISABLE;
+        }
+        sigaltstack(&previous, NULL);
         free(currentThreadInfo.signalHandlerStack);
         currentThreadInfo.signalHandlerStack = NULL;
     }
