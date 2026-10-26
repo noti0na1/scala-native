@@ -29,6 +29,9 @@ void scalanative_assignCurrentThread(JavaThread thread,
 JavaThread scalanative_currentThread() { return currentThread; }
 NativeThread scalanative_currentNativeThread() { return currentNativeThread; }
 ThreadInfo *scalanative_currentThreadInfo() { return &currentThreadInfo; }
+void scalanative_setCurrentThreadInitialized(bool initialized) {
+    currentThreadInfo.isInitialized = initialized;
+}
 
 size_t scalanative_mainThreadMaxStackSize() {
     static size_t computed = -1;

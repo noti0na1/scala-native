@@ -32,7 +32,8 @@ private[java] class PosixThread(
 
   override def companion: NativeThread.Companion = PosixThread
 
-  override def stackSize: scala.Int = NativeThread.calculateStackSize(
+  // Computed by the starting thread, where an OutOfMemoryError can be handled
+  override val stackSize: scala.Int = NativeThread.calculateStackSize(
     userDefinedStackSize = userDefinedStackSize,
     osDefaultStackSize = PosixThread.defaultOSStackSize
   )

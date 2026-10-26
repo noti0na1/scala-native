@@ -42,6 +42,8 @@ void scalanative_assignCurrentThread(JavaThread thread,
 JavaThread scalanative_currentThread();
 NativeThread scalanative_currentNativeThread();
 ThreadInfo *scalanative_currentThreadInfo();
+// Sets the flag without allocating, for code that no handler covers
+void scalanative_setCurrentThreadInitialized(bool initialized);
 void scalanative_setupCurrentThreadInfo(void *stackBottom, int32_t stackSize,
                                         bool isMainThread);
 /* Discover actual OS-thread bounds without modifying currentThreadInfo or

@@ -61,7 +61,7 @@ package object runtime {
     // A library must not replace the host's alternate signal stack or guards.
     OutOfMemory.preallocateFallback()
     Thread.currentThread()
-    NativeThread.TLS.currentThreadInfo().isInitialized = true
+    NativeThread.TLS.setCurrentThreadInitialized(true)
   }
 
   /** Initialize runtime with given arguments and return the rest as Java-style
@@ -87,7 +87,7 @@ package object runtime {
       )
       System.exit(1)
     }
-    NativeThread.TLS.currentThreadInfo().isInitialized = true
+    NativeThread.TLS.setCurrentThreadInitialized(true)
 
     val argv = fromRawPtr[CString](rawargv)
     val args = new scala.Array[String](argc - 1)
@@ -141,7 +141,7 @@ package object runtime {
       }
       shouldWaitForThreads || shouldRunQueuedTasks
     }) ()
-    NativeThread.TLS.currentThreadInfo().isInitialized = false
+    NativeThread.TLS.setCurrentThreadInitialized(false)
     StackOverflowGuards.close()
   }
 

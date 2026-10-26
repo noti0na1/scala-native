@@ -262,7 +262,7 @@ object NativeThread {
 
     nativeThread.state = State.Running
     atomic_thread_fence(memory_order_seq_cst)
-    TLS.currentThreadInfo().isInitialized = true
+    TLS.setCurrentThreadInitialized(true)
     try {
       // Ensure Java Thread already assigned the Native Thread instance
       // Otherwise park/unpark events might be lost
@@ -277,7 +277,7 @@ object NativeThread {
         if (handler != null)
           executeUncaughtExceptionHandler(handler, thread, ex)
     } finally {
-      TLS.currentThreadInfo().isInitialized = false
+      TLS.setCurrentThreadInitialized(false)
       thread.synchronized {
         try nativeThread.onTermination()
         catch { case ex: jl.Throwable => () }
@@ -311,6 +311,14 @@ object NativeThread {
 
     @name("scalanative_currentThreadInfo")
     private[runtime] def currentThreadInfo(): Ptr[ThreadInfo] = extern
+
+    /** Sets `isInitialized` without allocating, where an OutOfMemoryError would
+     *  end the process.
+     */
+    @name("scalanative_setCurrentThreadInitialized")
+    private[runtime] def setCurrentThreadInitialized(
+        initialized: Boolean
+    ): Unit = extern
   }
 
   /** Common prefix of the C `ThreadInfo` in `nativeThreadTLS.h`. Field order
