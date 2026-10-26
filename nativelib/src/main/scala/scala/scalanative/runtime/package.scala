@@ -360,29 +360,4 @@ package object runtime {
     ???
   }
 
-  @extern private[runtime] object StackOverflowGuards {
-    @name("scalanative_StackOverflowGuards_size")
-    def size: Int = extern
-
-    @name("scalanative_StackOverflowGuards_setup")
-    def setup(isMainThread: Boolean): Unit = extern
-
-    @name("scalanative_StackOverflowGuards_reset")
-    def reset(): Unit = extern
-
-    @name("scalanative_StackOverflowGuards_close")
-    def close(): Unit = extern
-  }
-
-  @extern private[runtime] object ModuleInitialization {
-    @name("scalanative_isModuleInitializationContext")
-    def isContext(context: RawPtr): Boolean = extern
-
-    @name("scalanative_moduleInitializationInstanceForCurrentThread")
-    def instanceForCurrentThread(context: RawPtr): AnyRef = extern
-
-    @name("scalanative_completeModuleInitializationForCurrentThread")
-    def completeForCurrentThread(): Unit = extern
-  }
-
 }
