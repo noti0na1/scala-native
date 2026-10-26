@@ -75,11 +75,13 @@ object Build {
       scalaBinVersion: String,
       nativeVersion: String
   ): File =
-    val (depScalaVersion, platformSuffix, artifactSuffix) =
-      if selfContained then (scalaVersion, scalaBinVersion, s"_$scalaBinVersion")
-      else (ScalaVersions.scala213, "2.13", "_2.13")
+    val (depScalaVersion, platformSuffix) =
+      if selfContained then (scalaVersion, scalaBinVersion)
+      else (ScalaVersions.scala213, "2.13")
     val revision = scalalibVersion(depScalaVersion, nativeVersion)
-    ivyHome / "local" / org / s"scalalib_native0.5_$platformSuffix" / revision / "jars" / s"scalalib$artifactSuffix.jar"
+    // An Ivy repository names the jar after the module, its cross-version suffixes included
+    val module = s"scalalib_native0.5_$platformSuffix"
+    ivyHome / "local" / org / module / revision / "jars" / s"$module.jar"
 
   private def checkoutScalaUpstreamSources(
       log: sbt.util.Logger,
@@ -761,8 +763,8 @@ object Build {
             //      and native toolchain settings
             //   2. the absolute path of the published jar
             //
-            // We republish when the cache key changes or when the stamped jar no longer
-            // exists (for example after cleaning ~/.ivy2/local).
+            // We republish when the cache key changes, when the Ivy home is another one,
+            // or when the jar no longer exists (for example after cleaning ~/.ivy2/local).
             publishScalalibLocal := Def.uncached {
               Def.taskDyn {
                 val selfContained = usesSelfContainedStdlib(scalaVersion.value)
@@ -798,7 +800,7 @@ object Build {
                   val upToDate = stampFile.exists && {
                     IO.read(stampFile).split("\n", 2) match
                       case Array(storedInputs, storedJar) =>
-                        storedInputs == inputs && storedJar.nonEmpty && file(storedJar).exists()
+                        storedInputs == inputs && storedJar == jar.getAbsolutePath && jar.exists()
                       case _ => false
                   }
                   (upToDate, inputs, jar)
