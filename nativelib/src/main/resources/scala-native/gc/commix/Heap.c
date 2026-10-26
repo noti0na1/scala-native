@@ -85,6 +85,18 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
         maxHeapSize = memoryLimit;
     }
 
+#ifdef GC_ASSERTIONS
+    // In these builds, nextBlock is a signed BLOCK_COUNT_BITS-bit field
+    uint64_t assertionsLimit =
+        ((uint64_t)1 << (BLOCK_COUNT_BITS - 1)) * SPACE_USED_PER_BLOCK;
+    if ((uint64_t)maxHeapSize > assertionsLimit) {
+        GC_LOG_ERROR("Commix built with GC_ASSERTIONS supports a heap of at "
+                     "most %" PRIu64 "g: set GC_MAXIMUM_HEAP_SIZE",
+                     assertionsLimit >> 30);
+        exit(1);
+    }
+#endif
+
     uint32_t maxNumberOfBlocks = maxHeapSize / SPACE_USED_PER_BLOCK;
     assert(maxNumberOfBlocks > 1);
     uint32_t initialBlockCount = minHeapSize / SPACE_USED_PER_BLOCK;
