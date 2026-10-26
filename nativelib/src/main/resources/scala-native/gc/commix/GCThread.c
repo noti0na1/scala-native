@@ -10,6 +10,9 @@
 #include <errno.h>
 #include <stdlib.h>
 #include "State.h"
+#ifndef _WIN32
+#include <signal.h>
+#endif
 
 #ifdef _WIN32
 #define LastError GetLastError()
@@ -187,11 +190,28 @@ void GCThread_Init(GCThread *thread, int id, Heap *heap, Stats *stats) {
     thread->active = false;
     // we do not use the thread handle
     thread_t self;
-
-    if (id == 0) {
-        thread_create(&self, GCThread_loopMaster, (void *)thread);
-    } else {
-        thread_create(&self, GCThread_loop, (void *)thread);
+    routine_fn loop = id == 0 ? GCThread_loopMaster : GCThread_loop;
+#ifdef _WIN32
+    bool created = thread_create(&self, loop, (void *)thread);
+#else
+    // The new thread inherits this mask: block asynchronous signals, so that
+    // the program's handlers never run on GC threads. Faults stay deliverable.
+    sigset_t blocked, previous;
+    sigfillset(&blocked);
+    int faults[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP, SIGSYS, SIGABRT};
+    for (size_t i = 0; i < sizeof(faults) / sizeof(faults[0]); i++)
+        sigdelset(&blocked, faults[i]);
+    pthread_sigmask(SIG_BLOCK, &blocked, &previous);
+    bool created = thread_create(&self, loop, (void *)thread);
+    int error = errno;
+    pthread_sigmask(SIG_SETMASK, &previous, NULL);
+    errno = error;
+#endif
+    if (!created) {
+        GC_LOG_ERROR("Creating GC thread %d failed in commix GCThread_Init, "
+                     "error=%" PRIdErr,
+                     id, LastError);
+        exit(ExitValue);
     }
 }
 

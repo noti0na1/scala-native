@@ -1,7 +1,9 @@
 #include "shared/ThreadUtil.h"
 #include <stdio.h>
 #include <limits.h>
+#include <errno.h>
 
+// On failure, the error is in errno (GetLastError on Windows)
 INLINE
 bool thread_create(thread_t *ref, routine_fn routine, void *data) {
 #ifdef _WIN32
@@ -9,7 +11,10 @@ bool thread_create(thread_t *ref, routine_fn routine, void *data) {
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)routine, data, 0, NULL);
     return *ref != NULL;
 #else
-    return pthread_create(ref, NULL, routine, data) == 0;
+    int error = pthread_create(ref, NULL, routine, data);
+    if (error != 0)
+        errno = error;
+    return error == 0;
 #endif
 }
 
@@ -104,7 +109,12 @@ bool semaphore_wait(semaphore_t ref) {
 #ifdef _WIN32
     return WaitForSingleObject(ref, INFINITE) == WAIT_OBJECT_0;
 #else
-    return sem_wait(ref) == 0;
+    // Retry when a signal handler interrupts the wait, even with SA_RESTART
+    int result;
+    do {
+        result = sem_wait(ref);
+    } while (result != 0 && errno == EINTR);
+    return result == 0;
 #endif
 }
 
