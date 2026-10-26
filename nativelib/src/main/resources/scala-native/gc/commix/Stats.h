@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <time.h>
 #include "shared/Time.h"
+#include "shared/ThreadUtil.h"
 
 #define MUTATOR_THREAD_ID -1
 
@@ -42,6 +43,8 @@ typedef enum {
 } eventType;
 
 typedef struct {
+    // Guards the events and the file, which is NULL once closed
+    mutex_t lock;
     FILE *outFile;
     uint64_t events;
     int8_t gc_thread;

@@ -18,7 +18,10 @@ const char *const Stats_eventNames[] = {
     "sweep_batch", "coalesce_batch", "mark_waiting", "nullify_waiting",
     "sync"};
 
+static void Stats_write(Stats *stats);
+
 void Stats_Init(Stats *stats, const char *statsFile, int8_t gc_thread) {
+    mutex_init(&stats->lock);
     stats->outFile = fopen(statsFile, "w");
     stats->gc_thread = gc_thread;
     fprintf(stats->outFile, "event_type,gc_thread,start_ns,time_ns\n");
@@ -35,39 +38,55 @@ INLINE
 void Stats_RecordEvent(Stats *stats, eventType eType, uint64_t start_ns,
                        uint64_t end_ns) {
     if (stats != NULL && start_ns != 0) {
+        mutex_lock(&stats->lock);
         uint64_t index = stats->events;
         stats->start_ns[index] = start_ns;
         stats->time_ns[index] = end_ns - start_ns;
         stats->event_types[index] = eType;
         stats->events += 1;
         if (stats->events == STATS_MEASUREMENTS) {
-            Stats_WriteToFile(stats);
+            Stats_write(stats);
         }
+        mutex_unlock(&stats->lock);
     }
 }
 
-INLINE
 void Stats_WriteToFile(Stats *stats) {
     if (stats != NULL) {
-        uint64_t events = stats->events;
-        FILE *outFile = stats->outFile;
-        for (uint64_t i = 0; i < events; i++) {
-            fprintf(outFile, "%s,%" PRId8 ",%" PRIu64 ",%" PRIu64 "\n",
-                    Stats_eventNames[stats->event_types[i]], stats->gc_thread,
-                    stats->start_ns[i], stats->time_ns[i]);
-        }
-        fflush(outFile);
-        stats->events = 0;
+        mutex_lock(&stats->lock);
+        Stats_write(stats);
+        mutex_unlock(&stats->lock);
     }
+}
+
+// Called with the lock held. Drops the events once the file is closed.
+static void Stats_write(Stats *stats) {
+    uint64_t events = stats->events;
+    FILE *outFile = stats->outFile;
+    if (outFile == NULL) {
+        stats->events = 0;
+        return;
+    }
+    for (uint64_t i = 0; i < events; i++) {
+        fprintf(outFile, "%s,%" PRId8 ",%" PRIu64 ",%" PRIu64 "\n",
+                Stats_eventNames[stats->event_types[i]], stats->gc_thread,
+                stats->start_ns[i], stats->time_ns[i]);
+    }
+    fflush(outFile);
+    stats->events = 0;
 }
 
 void Stats_OnExit(Stats *stats) {
     if (stats != NULL) {
+        mutex_lock(&stats->lock);
         if (stats->events > 0) {
             // there were some measurements not written in the last full batch.
-            Stats_WriteToFile(stats);
+            Stats_write(stats);
         }
-        fclose(stats->outFile);
+        if (stats->outFile != NULL)
+            fclose(stats->outFile);
+        stats->outFile = NULL;
+        mutex_unlock(&stats->lock);
     }
 }
 #endif // ENABLE_GC_STATS
