@@ -109,6 +109,8 @@ typedef struct event {
 #endif
     int signaled;
 } event;
+// clang-format 14 and later versions lay out these initializers differently
+// clang-format off
 #ifdef _WIN32
 #define EVENT_INIT                                                             \
     { SRWLOCK_INIT, CONDITION_VARIABLE_INIT, 0 }
@@ -116,6 +118,7 @@ typedef struct event {
 #define EVENT_INIT                                                             \
     { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0 }
 #endif
+// clang-format on
 static void event_set(event *e) {
     host_mutex_lock(&e->mutex);
     e->signaled = 1;

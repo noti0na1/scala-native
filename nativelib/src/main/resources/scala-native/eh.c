@@ -21,9 +21,12 @@
 #endif
 
 // Recover the containing wrapper without assumptions about struct padding.
+// clang-format 14 and later versions break the subtraction differently
+// clang-format off
 #define GetExceptionWrapper(exceptionPointer)                                  \
     ((ExceptionWrapper *)((char *)(exceptionPointer)-offsetof(                 \
         ExceptionWrapper, unwindException)))
+// clang-format on
 
 typedef void *Exception;
 typedef void (*OnCatchHandler)(Exception);

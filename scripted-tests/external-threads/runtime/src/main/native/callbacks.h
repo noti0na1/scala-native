@@ -115,7 +115,8 @@ static void entry_wrappers(void) {
     cpp_worker.join();
 #endif
     worker_join(worker_start(raw_callback, NULL));
-    int64_t (*fn)(void) = (int64_t(*)(void))external_function_pointer();
+    typedef int64_t (*Int64Function)(void);
+    Int64Function fn = (Int64Function)external_function_pointer();
     CHECK(fn && fn() == external_identity());
     external_set_value(51);
     CHECK(external_get_value() == 51);

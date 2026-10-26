@@ -46,6 +46,8 @@ void GC_Log_Write(GC_LogLevel level, const char *prefix, const char *format,
                   ...);
 
 // Logging macros - check level before formatting to avoid overhead
+// clang-format 14 and later versions break the calls differently
+// clang-format off
 #define GC_LOG_DEBUG(fmt, ...)                                                 \
     do {                                                                       \
         if (GC_Log_GetLevel() <= GC_LOG_LEVEL_DEBUG) {                         \
@@ -77,5 +79,6 @@ void GC_Log_Write(GC_LogLevel level, const char *prefix, const char *format,
                          ##__VA_ARGS__);                                       \
         }                                                                      \
     } while (0)
+// clang-format on
 
 #endif // GC_LOG_H
