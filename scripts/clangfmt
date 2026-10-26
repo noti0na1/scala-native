@@ -99,7 +99,7 @@ elif [[ "$CHECK_MODIFIED_ONLY" == "1" ]]; then
 else
   find . -name "*.[ch]" -or -name "*.[ch]pp" | \
     grep -F -v './nativelib/src/main/resources/scala-native/platform/posix/libunwind/' | \
-    grep -E -v '.*/target/scala.*' | \
+    grep -E -v '(^|/)target/' | \
     grep -E -v ".*/(.venv|.scala-build)/" | \
     (xargs "$clang_format" --style=file "$opts" $err || die "C/C++ code formatting changes detected, Run '$0' to reformat.")
 fi
