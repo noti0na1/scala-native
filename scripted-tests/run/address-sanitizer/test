@@ -1,0 +1,3 @@
+# AddressSanitizer is not used on Windows
+> set nativeConfig ~= { c => if (scala.util.Properties.isWin) c else c.withSanitizer(scala.scalanative.build.Sanitizer.AddressSanitizer) }
+> checkSanitized
