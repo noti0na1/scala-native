@@ -665,12 +665,13 @@ void Sweeper_LazyCoalesce(Heap *heap, Stats *stats) {
 void Sweeper_ClearIsSwept(Heap *heap) {
     BlockMeta *current = (BlockMeta *)heap->blockMetaStart;
     BlockMeta *limit = (BlockMeta *)heap->blockMetaEnd;
+    // The sweep skips the sweep reserve, if the last sweep could keep one
     BlockMeta *reserveFirst = (BlockMeta *)blockAllocator.reservedSuperblock;
-    BlockMeta *reserveLimit = reserveFirst + SWEEP_RESERVE_BLOCKS;
-    if (reserveFirst == NULL)
-        return;
+    BlockMeta *reserveLimit =
+        reserveFirst == NULL ? NULL : reserveFirst + SWEEP_RESERVE_BLOCKS;
     while (current < limit) {
-        if (current < reserveFirst || current >= reserveLimit) {
+        if (reserveFirst == NULL || current < reserveFirst ||
+            current >= reserveLimit) {
             current->debugFlag = dbg_must_sweep;
         }
         current++;
