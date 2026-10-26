@@ -212,6 +212,9 @@ word_t *LargeAllocator_lazySweep(LargeAllocator *largeAllocator, Heap *heap,
             atomic_thread_fence(memory_order_acquire);
         }
     }
+    // The sweep's end may have grown the heap since the last attempt
+    if (object == NULL)
+        object = LargeAllocator_tryAlloc(largeAllocator, size);
     Stats_RecordTime(stats, end_ns);
     Stats_RecordEvent(stats, event_sweep, start_ns, end_ns);
     return object;

@@ -355,6 +355,9 @@ word_t *Allocator_lazySweep(Allocator *allocator, Heap *heap, uint32_t size) {
             atomic_thread_fence(memory_order_acquire);
         }
     }
+    // The sweep's end may have grown the heap since the last attempt
+    if (object == NULL)
+        object = Allocator_tryAlloc(allocator, size);
     Stats_RecordTime(stats, end_ns);
     Stats_RecordEvent(stats, event_sweep, start_ns, end_ns);
     return object;
