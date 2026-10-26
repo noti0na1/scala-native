@@ -1269,7 +1269,22 @@ object Build {
     /** Uses the Scala Native compiler plugin. */
     def withNativeCompilerPlugin: MultiScalaProject = {
       if (isGeneratingForIDE) project
-      else project.dependsOn((nscPlugin % "plugin"))
+      else
+        project
+          .dependsOn((nscPlugin % "plugin"))
+          .mapBinaryVersions { version =>
+            _.settings(
+              // The plugin reaches the compiler as -Xplugin:<jar path>, so sbt's
+              // compile cache would reuse output of an older plugin at the same
+              // path. Key the options on the jar's content as well.
+              Compile / scalacOptions += Def.taskDyn {
+                val pluginProject = nscPlugin.forBinaryVersion(version)
+                (pluginProject / Compile / packageBin).map { jar =>
+                  s"-Xmacro-settings:nscplugin=${jar.contentHashStr()}"
+                }
+              }.value
+            )
+          }
     }.enablePlugins(MyScalaNativePlugin)
 
     def withJUnitPlugin: MultiScalaProject = {
