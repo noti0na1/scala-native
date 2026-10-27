@@ -12,7 +12,7 @@ import scala.scalanative.annotation.alwaysinline
 import scala.scalanative.libc.stdatomic.{AtomicBool, AtomicInt, AtomicRef}
 import scala.scalanative.runtime
 import scala.scalanative.runtime.javalib.Proxy
-import scala.scalanative.runtime.{Continuations, Intrinsics, NativeThread, VirtualThreadScheduler, fromRawPtr}
+import scala.scalanative.runtime.{Continuations, Intrinsics, NativeThread, RawPtr, VirtualThreadScheduler, fromRawPtr}
 
 /** Loom-style virtual thread: a `Runnable` fiber that mounts on a platform carrier, suspends via
  *  `Continuations.suspend`, and resumes through `VirtualThreadScheduler`.
@@ -104,6 +104,12 @@ private[java] final class VirtualThread(
   @volatile var termination: CountDownLatch | Null = compiletime.uninitialized
   @volatile var state: VirtualThread.State = VirtualThread.State.New
   @volatile var runDispatchState: VirtualThread.DispatchState = VirtualThread.DispatchState.Idle
+
+  // The runtime's mark of a wait for a module on a class's monitor, which the
+  // carrier's thread-local storage holds while this thread is mounted, and the
+  // carrier's own mark, kept here meanwhile
+  private var moduleWaiter: RawPtr = compiletime.uninitialized
+  private var carrierModuleWaiter: RawPtr = compiletime.uninitialized
 
   // ---------------------------------------------------------------------------
   // Atomic field access & state predicates
@@ -682,6 +688,7 @@ private[java] final class VirtualThread(
       }
     }
     NativeThread.setCurrentThread(this)
+    carrierModuleWaiter = Proxy.swapModuleWaiter(moduleWaiter)
   }
 
   /** Restores the carrier as `NativeThread.currentThread`, clears `carrierThread` under `interruptLock`, and clears the
@@ -695,6 +702,7 @@ private[java] final class VirtualThread(
     if (carrier == null) {
       throw new IllegalStateException("carrierThread is null during unmount")
     }
+    moduleWaiter = Proxy.swapModuleWaiter(carrierModuleWaiter)
     NativeThread.setCurrentThread(carrier)
 
     // break connection to carrier thread, synchronized with interrupt

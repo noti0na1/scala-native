@@ -48,4 +48,12 @@ object Proxy {
 
   def defaultVirtualThreadScheduler: VirtualThreadScheduler =
     VirtualThread.defaultScheduler
+
+  /** Installs the given mark of the running thread's wait for a module and
+   *  returns the one it replaces: a virtual thread takes its own in when it is
+   *  mounted, and out when it is unmounted.
+   */
+  @alwaysinline
+  def swapModuleWaiter(waiter: RawPtr): RawPtr =
+    ModuleInitialization.swapWaiter(waiter)
 }

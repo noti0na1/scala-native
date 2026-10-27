@@ -120,6 +120,15 @@ void scalanative_endWaitForModule(void *previous) {
     currentModuleWaiter = previous;
 }
 
+// A virtual thread may be unmounted while it waits on the monitor, and go on
+// on another carrier: it takes its mark out of the carrier's storage when it
+// is unmounted, and back in when it is mounted.
+void *scalanative_swapModuleWaiter(void *waiter) {
+    void *previous = currentModuleWaiter;
+    currentModuleWaiter = waiter;
+    return previous;
+}
+
 // Pauses a wait for a module without a monitor: yields at first, then sleeps
 // up to a millisecond at a time, unmanaged so that collections go on.
 void scalanative_moduleInitializationPause(int32_t attempt) {

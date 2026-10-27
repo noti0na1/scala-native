@@ -437,6 +437,12 @@ package object runtime {
 
     @name("scalanative_endWaitForModule")
     def endWait(previous: RawPtr): Unit = extern
+
+    /** Installs the given mark of a wait for a module on a class's monitor and
+     *  returns the one it replaces.
+     */
+    @name("scalanative_swapModuleWaiter")
+    def swapWaiter(waiter: RawPtr): RawPtr = extern
   }
 
 }
