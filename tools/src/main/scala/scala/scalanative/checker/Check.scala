@@ -124,9 +124,213 @@ private[scalanative] final class Check(implicit
         }
     }
 
+    checkDefinitions(insts.toIndexedSeq)
+
     env.clear()
     labels.clear()
   }
+
+  /** Checks that the definition of every local dominates its uses.
+   *
+   *  An instruction with an exception edge leaves its block before its result
+   *  is defined, so blocks are split after each such instruction. The exception
+   *  that an edge binds may be used only as an argument of the edge. Uses in
+   *  unreachable code are not checked.
+   */
+  private def checkDefinitions(insts: IndexedSeq[nir.Inst]): Unit =
+    if (insts.nonEmpty && insts.head.isInstanceOf[nir.Inst.Label]) {
+      val count = insts.length
+      // The node of each instruction's uses: a block, or the part of a block
+      // after an instruction with an exception edge
+      val nodeOf = new Array[Int](count)
+      val nodeOfLabel = mutable.LongMap.empty[Int]
+      // Where each local is defined: node and instruction index
+      val defNode = mutable.LongMap.empty[Int]
+      val defIndex = mutable.LongMap.empty[Int]
+      val edgeFrom = mutable.ArrayBuffer.empty[Int]
+      val edgeTo = mutable.ArrayBuffer.empty[Long] // a label, or -1 - node
+      var nodes = 0
+      var current = -1
+
+      def define(local: nir.Local, node: Int, idx: Int): Unit = {
+        defNode(local.id) = node
+        defIndex(local.id) = idx
+      }
+      def edgeToLabel(from: Int, next: nir.Next): Unit = next match {
+        case nir.Next.Label(id, _)    => edgeFrom += from; edgeTo += id.id
+        case nir.Next.Unwind(_, next) => edgeToLabel(from, next)
+        case nir.Next.Case(_, next)   => edgeToLabel(from, next)
+        case nir.Next.None            => ()
+      }
+
+      insts.indices.foreach { idx =>
+        insts(idx) match {
+          case nir.Inst.Label(id, params) =>
+            current = nodes
+            nodes += 1
+            nodeOfLabel(id.id) = current
+            nodeOf(idx) = current
+            params.foreach(param => define(param.id, current, idx))
+          case nir.Inst.Let(id, _, unwind) =>
+            nodeOf(idx) = current
+            if (unwind ne nir.Next.None) {
+              edgeToLabel(current, unwind)
+              val next = nodes
+              nodes += 1
+              edgeFrom += current
+              edgeTo += -1L - next
+              current = next
+            }
+            define(id, current, idx)
+          case cf: nir.Inst.Cf =>
+            nodeOf(idx) = current
+            cf match {
+              case nir.Inst.Jump(next)          => edgeToLabel(current, next)
+              case nir.Inst.If(_, thenp, elsep) =>
+                edgeToLabel(current, thenp)
+                edgeToLabel(current, elsep)
+              case nir.Inst.Switch(_, default, cases) =>
+                edgeToLabel(current, default)
+                cases.foreach(edgeToLabel(current, _))
+              case nir.Inst.Throw(_, unwind)    => edgeToLabel(current, unwind)
+              case nir.Inst.Unreachable(unwind) => edgeToLabel(current, unwind)
+              case _                            => ()
+            }
+        }
+      }
+
+      val succs = Array.fill(nodes)(mutable.ArrayBuffer.empty[Int])
+      val preds = Array.fill(nodes)(mutable.ArrayBuffer.empty[Int])
+      edgeFrom.indices.foreach { i =>
+        val to = edgeTo(i)
+        val target =
+          if (to < 0) (-1L - to).toInt
+          else nodeOfLabel.getOrElse(to, -1)
+        if (target >= 0) {
+          succs(edgeFrom(i)) += target
+          preds(target) += edgeFrom(i)
+        }
+      }
+
+      // Dominators (Cooper, Harvey and Kennedy), over the reverse postorder of
+      // the nodes reachable from the entry
+      val order = new Array[Int](nodes) // reverse postorder index, -1 if dead
+      java.util.Arrays.fill(order, -1)
+      val rpo = mutable.ArrayBuffer.empty[Int]
+      locally {
+        val visited = new Array[Boolean](nodes)
+        val stack = mutable.Stack.empty[(Int, Int)]
+        val post = mutable.ArrayBuffer.empty[Int]
+        visited(0) = true
+        stack.push((0, 0))
+        while (stack.nonEmpty) {
+          val (node, i) = stack.pop()
+          if (i < succs(node).size) {
+            stack.push((node, i + 1))
+            val succ = succs(node)(i)
+            if (!visited(succ)) {
+              visited(succ) = true
+              stack.push((succ, 0))
+            }
+          } else post += node
+        }
+        post.reverseIterator.foreach { node =>
+          order(node) = rpo.size
+          rpo += node
+        }
+      }
+      val idom = new Array[Int](nodes)
+      java.util.Arrays.fill(idom, -1)
+      idom(0) = 0
+      def intersect(a0: Int, b0: Int): Int = {
+        var a = a0
+        var b = b0
+        while (a != b) {
+          while (order(a) > order(b)) a = idom(a)
+          while (order(b) > order(a)) b = idom(b)
+        }
+        a
+      }
+      var changed = true
+      while (changed) {
+        changed = false
+        rpo.iterator.drop(1).foreach { node =>
+          var newIdom = -1
+          preds(node).foreach { pred =>
+            if (idom(pred) >= 0)
+              newIdom = if (newIdom < 0) pred else intersect(pred, newIdom)
+          }
+          if (newIdom != idom(node)) {
+            idom(node) = newIdom
+            changed = true
+          }
+        }
+      }
+      // Intervals of the dominator tree: `a` dominates `b` if b's interval is
+      // inside a's
+      val enter = new Array[Int](nodes)
+      val exit = new Array[Int](nodes)
+      locally {
+        val children = Array.fill(nodes)(mutable.ArrayBuffer.empty[Int])
+        rpo.iterator.drop(1).foreach(node => children(idom(node)) += node)
+        var clock = 0
+        val stack = mutable.Stack.empty[(Int, Boolean)]
+        stack.push((0, false))
+        while (stack.nonEmpty) {
+          val (node, done) = stack.pop()
+          if (done) {
+            exit(node) = clock
+            clock += 1
+          } else {
+            enter(node) = clock
+            clock += 1
+            stack.push((node, true))
+            children(node).foreach(child => stack.push((child, false)))
+          }
+        }
+      }
+      def dominates(a: Int, b: Int): Boolean =
+        enter(a) <= enter(b) && exit(b) <= exit(a)
+
+      var useNode = 0
+      var useIndex = 0
+      // The exception of the edge whose arguments are being checked
+      var edgeParam = Long.MinValue
+      def use(local: nir.Local): Unit =
+        if (local.id != edgeParam) {
+          val defined = defNode.get(local.id) match {
+            case None       => false
+            case Some(node) =>
+              if (node == useNode) defIndex(local.id) < useIndex
+              else order(node) >= 0 && dominates(node, useNode)
+          }
+          if (!defined)
+            in(s"inst #${useIndex + 1}") {
+              error(s"${local.show} is not defined on every path to its use")
+            }
+        }
+      val uses = new nir.Traverse {
+        override def onVal(value: nir.Val): Unit = value match {
+          case nir.Val.Local(local, _) => use(local)
+          case _                       => super.onVal(value)
+        }
+        override def onNext(next: nir.Next): Unit = next match {
+          case nir.Next.Unwind(nir.Val.Local(exc, _), next) =>
+            edgeParam = exc.id
+            try onNext(next)
+            finally edgeParam = Long.MinValue
+          case _ => super.onNext(next)
+        }
+      }
+      insts.indices.foreach { idx =>
+        useNode = nodeOf(idx)
+        useIndex = idx
+        if (order(useNode) >= 0) insts(idx) match {
+          case _: nir.Inst.Label => ()
+          case inst              => uses.onInst(inst)
+        }
+      }
+    }
 
   def enterInst(inst: nir.Inst): Unit = {
     def enterParam(value: nir.Val.Local) = {
