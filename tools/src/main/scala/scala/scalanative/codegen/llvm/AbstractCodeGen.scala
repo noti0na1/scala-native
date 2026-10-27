@@ -200,9 +200,22 @@ private[codegen] abstract class AbstractCodeGen(
         newline()
         str("@")
         genGlobal(name)
-        str(" = private unnamed_addr constant ")
+        if (isStringObject(v)) str(" = private global ")
+        else str(" = private unnamed_addr constant ")
         genVal(v)
     }
+  }
+
+  private val stringTypeInfo =
+    nir.Rt.StringName.member(nir.Sig.Generated("type"))
+
+  // A string literal's object is writable, its characters are not: locking on
+  // it writes its lock word, and String.hashCode stores the hash of a string
+  // whose hash is 0. Its address is significant, for `eq`.
+  private def isStringObject(v: nir.Val): Boolean = v match {
+    case nir.Val.StructValue(nir.Val.Global(name, _) +: _) =>
+      name == stringTypeInfo
+    case _ => false
   }
 
   private def genDefn(defn: nir.Defn)(implicit
