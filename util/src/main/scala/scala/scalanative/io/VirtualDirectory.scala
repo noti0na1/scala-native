@@ -6,7 +6,6 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels._
 import java.nio.file._
-import java.util.HashMap
 
 import scalanative.util.{Scope, acquire, defer}
 
@@ -173,17 +172,10 @@ object VirtualDirectory {
   private final class JarDirectory(override val path: Path)(implicit in: Scope)
       extends NioDirectory {
     def uri: URI = URI.create(s"jar:${path.toUri}")
+    // A file system of its own: one opened by URI is shared in the JVM, and
+    // the first scope to close it would close it for every other
     private val fileSystem: FileSystem =
-      acquire {
-        try {
-          val params = new HashMap[String, String]()
-          params.put("create", "false")
-          FileSystems.newFileSystem(uri, params)
-        } catch {
-          case e: FileSystemAlreadyExistsException =>
-            FileSystems.getFileSystem(uri)
-        }
-      }
+      acquire(FileSystems.newFileSystem(path, null: ClassLoader))
 
     override def pathMatcher(pattern: String): PathMatcher =
       fileSystem.getPathMatcher(pattern)
