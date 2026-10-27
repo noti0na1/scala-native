@@ -19,10 +19,8 @@ typedef Object *Stack_Type;
 typedef union {
     struct __attribute__((packed)) {
         UInt24 idx;
-        // Size is kept in the reference it is in sync with the grey list.
-        // Otherwise the updates can get reordered causing the number
-        // temporarily appearing larger than it is which will trigger
-        // Marker_IsMarkDone prematurely.
+        // Size is kept in the reference, so that it changes atomically with
+        // the list's head
         UInt24 size;
         uint16_t timesPoped; // used to avoid ABA problems when popping
     } sep;

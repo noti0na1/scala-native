@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include "WeakReferences.h"
+#include "Marker.h"
 #include "Stats.h"
 #ifndef _WIN32
 #include <unistd.h>
@@ -96,6 +97,8 @@ void Phase_Init(Heap *heap, uint32_t initialBlockCount) {
 
 void Phase_StartMark(Heap *heap) {
     heap->mark.currentStart_ns = Time_current_nanos();
+    // Before GC thread 0 wakes: it marks until marking is done
+    Marker_StartRoots(heap);
     Phase_Set(heap, gc_mark);
     // make sure the gc phase is propagated
     atomic_thread_fence(memory_order_release);

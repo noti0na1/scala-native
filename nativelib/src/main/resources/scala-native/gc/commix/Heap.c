@@ -171,6 +171,7 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
     uint32_t greyPacketCount =
         (uint32_t)(maxHeapSize * GREY_PACKET_RATIO / GREY_PACKET_SIZE);
     heap->mark.total = greyPacketCount;
+    atomic_init(&heap->mark.inFlight, 0);
     size_t greyPacketsSpaceSize = greyPacketCount * sizeof(GreyPacket);
     word_t *greyPacketsStart =
         Heap_mapAndAlign(greyPacketsSpaceSize, WORD_SIZE);

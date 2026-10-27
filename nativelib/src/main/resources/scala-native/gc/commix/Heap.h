@@ -65,6 +65,8 @@ typedef struct {
         uint64_t currentStart_ns;
         uint64_t currentEnd_ns;
         atomic_uint_fast32_t total;
+        // Marking work in flight; marking is done when it is 0 (Marker.c)
+        atomic_uint_fast32_t inFlight;
         GreyList empty;
         GreyList full;
         GreyList foundWeakRefs;

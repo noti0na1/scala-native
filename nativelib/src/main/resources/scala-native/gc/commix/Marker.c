@@ -37,11 +37,21 @@ extern int __modules_size;
 // another from the full packet list and returns the empty one to the empty
 // packet list. Similarly, when the "out" packet get full, marker gets another
 // empty packet and pushes the full one on the full packet list.
-// Marking is done when all the packets are empty in the empty packet list or
-// with only WeakRefereces in the WeakReference packet list. weakRefOut packets
-// are used to hold weakReferences found during the marking phase. This way, in
-// nullify phase it can be checked if their held objects were marked or not and
-// their fields can be set accordingly.
+// weakRefOut packets hold the WeakReferences found while marking, for the
+// nullify phase, which clears the referents that marking did not reach.
+//
+// Termination. `heap->mark.inFlight` counts the marking work in flight: every
+// packet that a marking thread has taken from the empty list and not given
+// back (to the empty list, or to the weak references), the full ones on the
+// full list among them, and one while the roots are scanned, counted before
+// the first GC thread wakes. A thread counts a packet before it takes it and
+// uncounts it after giving it back, and takes packets only while it holds
+// counted work itself, so the count, once 0, stays 0 until the next
+// collection: 0 means that marking is done. Being one atomic, it cannot show
+// marking done while another thread moves a packet from one list to another,
+// as a sum of the sizes of two lists could. Its decrements are releases and
+// the done check an acquire, so the check that reads 0 synchronizes with every
+// earlier decrement.
 //
 // An object can have different number of outgoing pointers. Therefore, the
 // number of objects to check per packet varies and packets take different
@@ -66,13 +76,26 @@ extern int __modules_size;
 /* May return NULL when all grey packets are in flight (e.g. many refrange
  * slices queued). Callers that must have a packet should use
  * `Marker_takeEmptyPacket`. */
+static inline void Marker_countIn(Heap *heap) {
+    atomic_fetch_add_explicit(&heap->mark.inFlight, 1, memory_order_relaxed);
+}
+
+static inline void Marker_countOut(Heap *heap) {
+    atomic_fetch_sub_explicit(&heap->mark.inFlight, 1, memory_order_release);
+}
+
 static inline GreyPacket *Marker_tryTakeEmptyPacket(Heap *heap, Stats *stats) {
-    return SyncGreyLists_takeEmptyPacket(heap, stats);
+    Marker_countIn(heap);
+    GreyPacket *packet = SyncGreyLists_takeEmptyPacket(heap, stats);
+    if (packet == NULL)
+        Marker_countOut(heap);
+    return packet;
 }
 
 static GreyPacket *Marker_takeEmptyPacket(Heap *heap, Stats *stats) {
+    Marker_countIn(heap);
     GreyPacket *packet;
-    while ((packet = Marker_tryTakeEmptyPacket(heap, stats)) == NULL) {
+    while ((packet = SyncGreyLists_takeEmptyPacket(heap, stats)) == NULL) {
         thread_yield();
     }
     return packet;
@@ -90,6 +113,7 @@ static inline GreyPacket *Marker_takeFullPacket(Heap *heap, Stats *stats) {
 static inline void Marker_giveEmptyPacket(Heap *heap, Stats *stats,
                                           GreyPacket *packet) {
     SyncGreyLists_giveEmptyPacket(heap, stats, packet);
+    Marker_countOut(heap);
 }
 
 static inline void Marker_giveFullPacket(Heap *heap, Stats *stats,
@@ -103,8 +127,10 @@ static inline void Marker_giveWeakRefPacket(Heap *heap, Stats *stats,
     if (!GreyPacket_IsEmpty(packet)) {
         SyncGreyLists_giveNotEmptyPacket(heap, stats, &heap->mark.foundWeakRefs,
                                          packet);
+        // Not marking work: the nullify phase takes it
+        Marker_countOut(heap);
     } else {
-        SyncGreyLists_giveEmptyPacket(heap, stats, packet);
+        Marker_giveEmptyPacket(heap, stats, packet);
     }
 }
 
@@ -470,6 +496,10 @@ void Marker_MarkUntilDone(Heap *heap, Stats *stats) {
             thread_yield();
         }
     }
+    // Every packet is back: empty, or holding weak references
+    assert(GreyList_Size(&heap->mark.empty) +
+               GreyList_Size(&heap->mark.foundWeakRefs) ==
+           heap->mark.total);
 }
 
 NO_SANITIZE void Marker_markProgramStack(MutatorThread *thread, Heap *heap,
@@ -568,13 +598,19 @@ void Marker_MarkRoots(Heap *heap, Stats *stats) {
     Marker_markCustomRoots(heap, stats, &out, &weakRefOut, customRoots);
     Marker_giveFullPacket(heap, stats, out);
     Marker_giveWeakRefPacket(heap, stats, weakRefOut);
+    // What the roots reached is in counted packets (Marker_StartRoots)
+    Marker_countOut(heap);
+}
+
+void Marker_StartRoots(Heap *heap) {
+    // The last marking ended with nothing in flight
+    assert(atomic_load(&heap->mark.inFlight) == 0);
+    Marker_countIn(heap);
 }
 
 bool Marker_IsMarkDone(Heap *heap) {
-    uint32_t emptySize = GreyList_Size(&heap->mark.empty);
-    uint32_t weakRefSize = GreyList_Size(&heap->mark.foundWeakRefs);
-    uint32_t size = emptySize + weakRefSize;
-    return size == heap->mark.total;
+    return atomic_load_explicit(&heap->mark.inFlight, memory_order_acquire) ==
+           0;
 }
 
 #endif
