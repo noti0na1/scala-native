@@ -11,6 +11,7 @@
 #include "shared/jmx.h"
 #include "nativeThreadTLS.h"
 #include "externalThreadGC.h"
+#include "shared/StaticObjects.h"
 
 static SN_ThreadLocal GC_MutatorThreadState executionState =
     GC_MutatorThreadState_Managed;
@@ -28,6 +29,12 @@ void scalanative_GC_init() {
     GC_set_on_collection_event(handleOnCollectionEvent);
     // Drive Java-side weak reference processing through Boehm finalizers.
     GC_set_java_finalization(1);
+#if defined(SCALANATIVE_MULTITHREADING_ENABLED) && defined(__APPLE__)
+    // In a Mach-O image, Boehm scans only the usual data sections, and an
+    // inflated lock word of a static object is the only reference to its
+    // monitor. Elsewhere, it scans every writable segment.
+    GC_add_roots(StaticObjects_Start(), StaticObjects_End());
+#endif
 }
 
 void *scalanative_GC_alloc(Rtti *info, size_t size) {

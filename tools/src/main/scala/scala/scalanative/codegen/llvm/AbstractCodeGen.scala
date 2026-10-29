@@ -200,10 +200,42 @@ private[codegen] abstract class AbstractCodeGen(
         newline()
         str("@")
         genGlobal(name)
-        if (isStringObject(v)) str(" = private global ")
-        else str(" = private unnamed_addr constant ")
-        genVal(v)
+        if (isStringObject(v)) {
+          str(" = private global ")
+          genVal(v)
+          genStaticObjectSection()
+        } else {
+          str(" = private unnamed_addr constant ")
+          genVal(v)
+        }
     }
+  }
+
+  /* Class objects, the instances of constant modules and the objects of
+   * string literals are outside the heap, but have a lock word. In
+   * multithreaded builds they are in one section, which the collector scans
+   * as a root range, as an inflated lock word is the only reference to its
+   * monitor (gc/shared/StaticObjects.c names the same section).
+   */
+  private val staticObjectsSection: Option[String] =
+    if (!platform.isMultithreadingEnabled) None
+    else if (platform.targetsWindows) Some(".snobj$b")
+    else if (meta.buildConfig.targetsMac) Some("__DATA,__sn_objects")
+    else Some("sn_objects")
+
+  private def genStaticObjectSection()(implicit sb: ShowBuilder): Unit =
+    staticObjectsSection.foreach { section =>
+      sb.str(", section \"")
+      sb.str(section)
+      sb.str("\"")
+    }
+
+  private val typeSig: nir.Sig = nir.Sig.Generated("type")
+  private val instanceSig: nir.Sig = nir.Sig.Generated("instance")
+
+  private def isStaticObject(name: nir.Global): Boolean = name match {
+    case nir.Global.Member(_, sig) => sig == typeSig || sig == instanceSig
+    case _                         => false
   }
 
   private val stringTypeInfo =
@@ -261,6 +293,7 @@ private[codegen] abstract class AbstractCodeGen(
       genType(ty)
     } else {
       genVal(rhs)
+      if (!isConst && isStaticObject(name)) genStaticObjectSection()
     }
   }
 

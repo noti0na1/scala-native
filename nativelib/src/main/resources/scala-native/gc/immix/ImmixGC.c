@@ -13,6 +13,7 @@
 #include "shared/Parsing.h"
 #include "shared/Log.h"
 #include "shared/jmx.h"
+#include "shared/StaticObjects.h"
 #ifdef SCALANATIVE_MULTITHREADING_ENABLED
 #include "immix_commix/Synchronizer.h"
 #endif
@@ -40,6 +41,13 @@ NOINLINE void scalanative_GC_init() {
     customRoots = GC_Roots_Init();
     if (customRoots == NULL)
         abort();
+#ifdef SCALANATIVE_MULTITHREADING_ENABLED
+    // An inflated lock word of an object outside the heap, such as a class's,
+    // is the only reference to its monitor
+    AddressRange staticObjects = {StaticObjects_Start(), StaticObjects_End()};
+    if (!GC_Roots_Add(customRoots, staticObjects))
+        abort();
+#endif
     atexit(scalanative_afterexit);
 }
 
