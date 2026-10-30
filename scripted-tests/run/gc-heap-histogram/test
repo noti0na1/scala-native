@@ -1,0 +1,8 @@
+# GC_HISTOGRAM_FILE lists the classes with the most live bytes after each
+# collection, with or without multithreading, which adds a lock word to
+# every object.
+
+> set nativeConfig ~= (_.withGC(scala.scalanative.build.GC.immix).withMultithreading(true))
+> checkHistogram
+> set nativeConfig ~= (_.withMultithreading(false))
+> checkHistogram

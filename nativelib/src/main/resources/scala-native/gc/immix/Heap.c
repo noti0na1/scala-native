@@ -126,6 +126,11 @@ void Heap_Init(Heap *heap, size_t minHeapSize, size_t maxHeapSize) {
         heap->stats = malloc(sizeof(Stats));
         Stats_Init(heap->stats, statsFile);
     }
+    char *histogramFile = Settings_HistogramFileName();
+    if (histogramFile != NULL) {
+        heap->histogram =
+            Histogram_Create(histogramFile, Settings_HistogramTop());
+    }
     mutex_init(&heap->lock);
 }
 
@@ -190,6 +195,9 @@ static bool Heap_collect(Heap *heap, Stack *stack, size_t allocationSize,
     GC_LOG_INFO("GC collection started");
     start_ns = Time_current_nanos();
     Marker_MarkRoots(heap, stack);
+    if (heap->histogram != NULL) {
+        Histogram_EndMarking(heap->histogram);
+    }
     if (stats != NULL) {
         nullify_start_ns = Time_current_nanos();
     }

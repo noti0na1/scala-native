@@ -11,6 +11,8 @@
 // Environment Variable Names
 // =============================================================================
 #define GC_STATS_FILE_SETTING "GC_STATS_FILE"
+#define GC_HISTOGRAM_FILE_SETTING "GC_HISTOGRAM_FILE"
+#define GC_HISTOGRAM_TOP_SETTING "GC_HISTOGRAM_TOP"
 
 // =============================================================================
 // Heap Settings API
@@ -18,6 +20,9 @@
 size_t Settings_MinHeapSize(void);
 size_t Settings_MaxHeapSize(void);
 char *Settings_StatsFileName(void);
+// The live-heap histogram, which only Immix writes
+char *Settings_HistogramFileName(void);
+size_t Settings_HistogramTop(void);
 
 // =============================================================================
 // Settings Initialization

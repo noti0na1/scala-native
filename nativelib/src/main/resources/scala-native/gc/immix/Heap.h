@@ -6,6 +6,7 @@
 #include "immix_commix/datastructures/Bytemap.h"
 #include "immix_commix/metadata/LineMeta.h"
 #include "Stats.h"
+#include "Histogram.h"
 #include "shared/ThreadUtil.h"
 #include <stdatomic.h>
 
@@ -27,6 +28,7 @@ typedef struct {
     atomic_bool emergencyBlockClaimed;
     Bytemap *bytemap;
     Stats *stats;
+    Histogram *histogram;
     mutex_t lock;
 } Heap;
 

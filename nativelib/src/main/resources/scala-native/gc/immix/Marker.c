@@ -84,8 +84,12 @@ void Marker_markConservative(Heap *heap, Stack *stack, word_t *address) {
 
 void Marker_Mark(Heap *heap, Stack *stack) {
     Bytemap *bytemap = heap->bytemap;
+    Histogram *histogram = heap->histogram;
     while (!Stack_IsEmpty(stack)) {
         Object *object = Stack_Pop(stack);
+        if (histogram != NULL) {
+            Histogram_Record(histogram, object);
+        }
         const int objectId = object->rtti->rt.id;
         if (Object_IsArray(object)) {
             ArrayHeader *arrayHeader = (ArrayHeader *)object;

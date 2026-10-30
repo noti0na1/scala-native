@@ -25,6 +25,14 @@ size_t Settings_MaxHeapSize(void) {
 
 char *Settings_StatsFileName(void) { return getenv(GC_STATS_FILE_SETTING); }
 
+char *Settings_HistogramFileName(void) {
+    return getenv(GC_HISTOGRAM_FILE_SETTING);
+}
+
+size_t Settings_HistogramTop(void) {
+    return Parse_Env_Or_Default_Long(GC_HISTOGRAM_TOP_SETTING, 40);
+}
+
 // =============================================================================
 // Settings Initialization
 // =============================================================================

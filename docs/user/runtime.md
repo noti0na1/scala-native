@@ -116,9 +116,22 @@ Log messages include timestamps in `[HH:MM:SS.mmm]` format with millisecond prec
 ## Immix GC
 
 The Immix GC uses the three variables shown above as well as the following
-variable.
+variables.
 
 -   GC_STATS_FILE (set to the file name)
+-   GC_HISTOGRAM_FILE (set to the file name)
+
+    After the marking of each collection, writes the classes with the most
+    live bytes to this file, one tab-separated line per class:
+    `<collection> <bytes> <objects> <instance size> <class>`. The collections
+    are numbered from 1. The instance size is the class's unaligned size
+    including its header, or 0 for arrays. Each collection ends with a line
+    for the class `*total*`, which counts all live objects. The program
+    overwrites the file when it starts.
+
+-   GC_HISTOGRAM_TOP (default is 40)
+
+    How many classes GC_HISTOGRAM_FILE lists per collection.
 
 ## Commix GC
 
