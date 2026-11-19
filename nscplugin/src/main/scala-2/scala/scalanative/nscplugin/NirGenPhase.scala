@@ -127,17 +127,19 @@ abstract class NirGenPhase[G <: Global with Singleton](override val global: G)
 
         /* I could not find any reference anywhere about what locale is used
          * by case-insensitive file systems to compare case-insensitively.
-         * In doubt, force the English locale, which is probably going to do
-         * the right thing in virtually all cases (especially if users stick
-         * to ASCII class names), and it has the merit of being deterministic,
-         * as opposed to using the OS' default locale.
+         * In doubt, lower-case each character on its own, which agrees with
+         * the English locale in virtually all cases (especially if users
+         * stick to ASCII class names), and it has the merit of being
+         * deterministic, as opposed to using the OS' default locale. It also
+         * needs no `java.util.Locale`, which the plugin lacks when it is
+         * built into the native compiler.
          * The JVM backend performs a similar test to emit a warning for
          * conflicting top-level classes. However, it uses `toLowerCase()`
          * without argument, which is not deterministic.
          */
 
         def caseInsensitiveNameOf(classDef: nir.Defn.Class): String =
-          classDef.name.mangle.toLowerCase(java.util.Locale.ENGLISH)
+          classDef.name.mangle.map(Character.toLowerCase)
 
         val generatedCaseInsensitiveNames =
           regularDefns.collect {

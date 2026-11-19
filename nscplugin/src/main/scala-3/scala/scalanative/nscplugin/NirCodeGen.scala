@@ -106,13 +106,15 @@ class NirCodeGen(val settings: GenNIR.Settings)(using ctx: Context)
     collectTypeDefs(cunit.tpdTree)
       .foreach(genClass)
 
+    // Group by name, not by output file: files for the same path need not be
+    // equal (scala/scala3#26688 made PlainFile equality depend on interning)
     generatedDefns.toSeq
-      .groupBy(defn => getFileFor(defn.name.top))
-      .foreach(genIRFile(_, _))
+      .groupBy(_.name.top)
+      .foreach((owner, defns) => genIRFile(getFileFor(owner), defns))
 
     reflectiveInstantiationBuffers
-      .groupMapReduce(buf => getFileFor(buf.name.top))(_.toSeq)(_ ++ _)
-      .foreach(genIRFile(_, _))
+      .groupMapReduce(_.name.top)(_.toSeq)(_ ++ _)
+      .foreach((owner, defns) => genIRFile(getFileFor(owner), defns))
 
     if (generatedMirrorClasses.nonEmpty) {
       // Ported from Scala.js
@@ -122,16 +124,18 @@ class NirCodeGen(val settings: GenNIR.Settings)(using ctx: Context)
 
       /* I could not find any reference anywhere about what locale is used
        * by case-insensitive file systems to compare case-insensitively.
-       * In doubt, force the English locale, which is probably going to do
-       * the right thing in virtually all cases (especially if users stick
-       * to ASCII class names), and it has the merit of being deterministic,
-       * as opposed to using the OS' default locale.
+       * In doubt, lower-case each character on its own, which agrees with
+       * the English locale in virtually all cases (especially if users
+       * stick to ASCII class names), and it has the merit of being
+       * deterministic, as opposed to using the OS' default locale. It also
+       * needs no `java.util.Locale`, which the plugin lacks when it is
+       * built into the native compiler.
        * The JVM backend performs a similar test to emit a warning for
        * conflicting top-level classes. However, it uses `toLowerCase()`
        * without argument, which is not deterministic.
        */
       def caseInsensitiveNameOf(classDef: nir.Defn.Class): String =
-        classDef.name.mangle.toLowerCase(java.util.Locale.ENGLISH)
+        classDef.name.mangle.map(Character.toLowerCase)
 
       val generatedCaseInsensitiveNames =
         generatedDefns.collect {
