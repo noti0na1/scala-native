@@ -114,6 +114,32 @@ static bool containsObject(const SNStaticSection *section, void *object) {
            address < (uintptr_t)section->end;
 }
 
+#ifdef SN_LIVE_EXECUTION
+/* The class and string sections of the extensions loaded into this program,
+ * see scalanative_register_extension_sections. The list only grows: the
+ * loader prepends to it under its own lock and publishes the new head, which
+ * readers load without locking.
+ */
+typedef struct ExtensionSections {
+    SNStaticSection classinfo;
+    SNStaticSection strings;
+    struct ExtensionSections *next;
+} ExtensionSections;
+
+static _Atomic(ExtensionSections *) extensionSections;
+
+static bool inExtensionSections(void *object) {
+    for (ExtensionSections *s =
+             atomic_load_explicit(&extensionSections, memory_order_acquire);
+         s != NULL; s = s->next) {
+        if (containsObject(&s->classinfo, object) ||
+            containsObject(&s->strings, object))
+            return true;
+    }
+    return false;
+}
+#endif
+
 /* Called when a monitor is inflated on any object. Heap objects and other
  * static storage are ignored: only objects in the class and string sections
  * need their lock word registered, global objects are always scanned. This
@@ -121,10 +147,31 @@ static bool containsObject(const SNStaticSection *section, void *object) {
  */
 SN_SECTION_LOCAL void scalanative_register_object_roots(void *object) {
     if (containsObject(scalanative_static_classinfo_section(), object) ||
-        containsObject(scalanative_static_strings_section(), object)) {
+        containsObject(scalanative_static_strings_section(), object)
+#ifdef SN_LIVE_EXECUTION
+        || inExtensionSections(object)
+#endif
+    ) {
         registerLockWord((void **)&((Object *)object)->lockWord);
     }
 }
+
+#ifdef SN_LIVE_EXECUTION
+SN_SECTION_LOCAL void
+scalanative_register_extension_sections(const SNStaticSection *globals,
+                                        const SNStaticSection *classinfo,
+                                        const SNStaticSection *strings) {
+    registerSection(globals);
+    ExtensionSections *sections = malloc(sizeof(ExtensionSections));
+    if (sections == NULL)
+        abort();
+    sections->classinfo = *classinfo;
+    sections->strings = *strings;
+    sections->next =
+        atomic_load_explicit(&extensionSections, memory_order_relaxed);
+    atomic_store_explicit(&extensionSections, sections, memory_order_release);
+}
+#endif
 
 SN_SECTION_LOCAL void scalanative_register_static_roots(void) {
     registerSection(scalanative_static_globals_section());
@@ -143,5 +190,16 @@ SN_SECTION_LOCAL void scalanative_register_static_roots(void) {
 SN_SECTION_LOCAL void scalanative_register_object_roots(void *object) {
     (void)object;
 }
+
+#ifdef SN_LIVE_EXECUTION
+SN_SECTION_LOCAL void
+scalanative_register_extension_sections(const SNStaticSection *globals,
+                                        const SNStaticSection *classinfo,
+                                        const SNStaticSection *strings) {
+    (void)classinfo;
+    (void)strings;
+    registerSection(globals);
+}
+#endif
 
 #endif

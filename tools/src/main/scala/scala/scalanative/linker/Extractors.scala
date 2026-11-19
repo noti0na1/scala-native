@@ -86,7 +86,8 @@ object ExactClassRef {
   )(implicit analysis: ReachabilityAnalysis.Result): Option[(Class, Boolean)] =
     ty match {
       case nir.Type.Ref(ClassRef(cls), exact, nullable)
-          if exact || cls.subclasses.isEmpty =>
+          if exact || (cls.subclasses.isEmpty &&
+          !analysis.mayHaveUnknownSubclasses(cls)) =>
         Some((cls, nullable))
       case UnitRef(nullable) =>
         Some(

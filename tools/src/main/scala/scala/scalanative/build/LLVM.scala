@@ -76,11 +76,33 @@ private[scalanative] object LLVM {
       analysis: ReachabilityAnalysis.Result,
       ec: ExecutionContext
   ): Future[Path] = Future {
+    val compilec = compileCommand(srcPath, objPath)
+
+    // compile
+    config.logger.running(compilec)
+    val result = Processes.run(
+      compilec,
+      config.workDir.toFile,
+      Logger.toCompilerProcessLogger(config.logger)
+    )
+    if (result != 0) {
+      throw new BuildException(s"Failed to compile ${srcPath.abs}")
+    }
+
+    objPath
+  }
+
+  /** The clang command that compiles `srcPath` into `objPath`: clang, `-c`, the
+   *  input, `-o`, the output, then the flags.
+   */
+  private def compileCommand(srcPath: Path, objPath: Path)(implicit
+      config: Config,
+      analysis: ReachabilityAnalysis.Result
+  ): Seq[String] = {
     val inpath = srcPath.abs
     val outpath = objPath.abs
     val isCpp = inpath.endsWith(cppExt)
     val isLl = inpath.endsWith(llExt)
-    val workDir = config.workDir
 
     val compiler = if (isCpp) config.clangPP.abs else config.clang.abs
     val langOptions = {
@@ -108,27 +130,19 @@ private[scalanative] object LLVM {
     }
     val debugFlags = sourceLevelDebugFlags
 
+    // A live-execution host exports C runtime functions through its export
+    // list, so they need default visibility
+    val visibility =
+      if (config.compilerConfig.liveExecution.isHost && !isLl)
+        "-fvisibility=default"
+      else "-fvisibility=hidden"
     val flags: Seq[String] =
       buildTargetCompileOpts ++ flto(Some(inpath)) ++ sanitizer ++
         target ++ langOptions ++ platformFlags ++ debugFlags ++
-        configFlags ++ Seq("-fvisibility=hidden", opt) ++
+        configFlags ++ Seq(visibility, opt) ++
         Seq("-fomit-frame-pointer") ++
         config.compileOptions
-    val compilec: Seq[String] =
-      Seq(compiler, "-c", inpath, "-o", outpath) ++ flags
-
-    // compile
-    config.logger.running(compilec)
-    val result = Processes.run(
-      compilec,
-      workDir.toFile,
-      Logger.toCompilerProcessLogger(config.logger)
-    )
-    if (result != 0) {
-      throw new BuildException(s"Failed to compile ${inpath}")
-    }
-
-    objPath
+    Seq(compiler, "-c", inpath, "-o", outpath) ++ flags
   }
 
   /** Links a collection of `.ll.o` files and the `.o` files from the
@@ -165,12 +179,56 @@ private[scalanative] object LLVM {
         prepareArchiveCommand(objectsPaths)
     }
     // link
-    val result = command ! Logger.toCompilerProcessLogger(config.logger)
+    val result = config.compilerConfig.liveExecution match {
+      case host: LiveExecution.Host if host.stubUnlinkable =>
+        linkWithWeakStubs(objectsPaths, analysis, command)
+      case _ => command ! Logger.toCompilerProcessLogger(config.logger)
+    }
     if (result != 0) {
       throw new BuildException(s"Failed to link ${buildPath}")
     }
 
     copyOutput(config, buildPath)
+  }
+
+  /** Links a live-execution host. If the link fails on undefined C functions,
+   *  links again with weak definitions of them (`LiveWeakStubs`).
+   */
+  private def linkWithWeakStubs(
+      objectsPaths: Seq[Path],
+      analysis: ReachabilityAnalysis.Result,
+      command: ProcessBuilder
+  )(implicit config: Config): Int = {
+    val output = scala.collection.mutable.ArrayBuffer.empty[String]
+    val first = command ! ProcessLogger(
+      line => { output += line; config.logger.debug(line) },
+      line => { output += line; config.logger.debug(line) }
+    )
+    if (first == 0) first
+    else {
+      val undefined =
+        LiveWeakStubs.undefinedSymbols(output.toSeq, config.targetsApple)
+      val variables =
+        undefined.filter(LiveWeakStubs.externVariables(analysis))
+      if (undefined.isEmpty || undefined.exists(LiveWeakStubs.isLoader) ||
+          variables.nonEmpty) {
+        output.foreach(config.logger.error(_))
+        if (undefined.exists(LiveWeakStubs.isLoader))
+          config.logger.error(
+            "The live-execution loader is missing functions: the class path's nativelib is older than the toolchain"
+          )
+        if (variables.nonEmpty)
+          config.logger.error(
+            "Extern variables this platform does not define: " +
+              variables.mkString(", ")
+          )
+        first
+      } else {
+        val stubs = LiveWeakStubs.compile(config, undefined)
+        prepareLinkCommand(objectsPaths :+ stubs)(config, analysis) !
+          Logger.toCompilerProcessLogger(config.logger)
+      }
+    }
   }
 
   /** Links the DWARF debug information found in the object file at `path`,
@@ -528,7 +586,8 @@ private[scalanative] object LLVM {
   private def buildTargetCompileOpts(implicit config: Config): Seq[String] =
     config.compilerConfig.buildTarget match {
       case BuildTarget.Application =>
-        Nil
+        if (config.compilerConfig.liveExecution.isExtension) optionalPICflag
+        else Nil
       case BuildTarget.LibraryStatic =>
         optionalPICflag ++ Seq("--emit-static-lib")
       case BuildTarget.LibraryDynamic =>
@@ -539,7 +598,12 @@ private[scalanative] object LLVM {
   private def buildTargetLinkOpts(implicit config: Config): Seq[String] = {
     val optRdynamic =
       if (config.targetsWindows) Nil
-      else {
+      else if (config.compilerConfig.liveExecution.isHost) {
+        // Export the symbols of the generated export list, not every function
+        val list = codegen.LiveBoundary.exportListPath(config).abs
+        if (config.targetsApple) Seq(s"-Wl,-exported_symbols_list,$list")
+        else Seq(s"-Wl,--dynamic-list=$list")
+      } else {
         if (config.linkingOptions.contains("-static")) Nil
         else Seq("-rdynamic")
       }
@@ -553,6 +617,99 @@ private[scalanative] object LLVM {
         Seq(libFlag) ++ optionalPICflag ++ optRdynamic
     }
   }
+
+  /** Links an extension's objects into a bundle (macOS) or a shared object,
+   *  bound to the host executable's exports, and when the extension is linked
+   *  against a chain (`LiveExecution.Extension.chain`), to the earlier
+   *  extensions' symbols when it is loaded. With the bounds of its static
+   *  sections (`codegen.LiveSections`).
+   */
+  def linkExtension(
+      config: Config,
+      analysis: ReachabilityAnalysis.Result,
+      hostBinary: Path,
+      objectsPaths: Seq[Path],
+      output: Path,
+      chain: Boolean
+  ): Path = {
+    implicit val _config: Config = config
+    val sections = codegen.LiveSections.compile(config)
+    val linker =
+      if (isCppRuntimeRequired(config, analysis)) config.clangPP
+      else config.clang
+    // With a chain, earlier extensions' symbols are bound when it is loaded:
+    // ld does not read their bundles
+    val flags =
+      if (config.targetsApple)
+        Seq("-bundle", "-bundle_loader", hostBinary.abs) ++
+          (if (chain) Seq("-undefined", "dynamic_lookup") else Nil)
+      else Seq("-shared", "-fPIC") ++ elfBindsLocally
+    val command =
+      Seq(linker.abs) ++ flags ++ target ++ sanitizer ++
+        Seq("-o", output.abs) ++ (objectsPaths :+ sections).map(_.abs) ++
+        config.linkingOptions
+    config.logger.running(command)
+    val result = Processes.run(
+      command,
+      config.workDir.toFile(),
+      Logger.toCompilerProcessLogger(config.logger)
+    )
+    if (result != 0)
+      throw new BuildException(s"Failed to link extension ${output}")
+    output
+  }
+
+  /** Compiles a chained extension's IR and links it in one clang call; the REPL
+   *  links each line this way. The extension binds to symbols of the host and
+   *  of the extensions loaded before it when it is loaded.
+   */
+  def compileAndLinkExtension(
+      config: Config,
+      analysis: ReachabilityAnalysis.Result,
+      irPaths: Seq[Path],
+      output: Path
+  ): Path = {
+    implicit val _config: Config = config
+    implicit val _analysis: ReachabilityAnalysis.Result = analysis
+    val sections = codegen.LiveSections.compile(config)
+    val compileFlags = irPaths.headOption.toSeq.flatMap { ir =>
+      // clang, -c, the input, -o, the output, then the flags
+      compileCommand(ir, Paths.get(ir.abs + oExt)).drop(5)
+    }
+    // Symbols of the host and of earlier extensions are bound when the module
+    // is loaded. The link has checked that the manifests export them, so ld
+    // does not need to read the host binary
+    val linkFlags =
+      if (config.targetsApple)
+        Seq("-bundle", "-undefined", "dynamic_lookup")
+      else Seq("-shared", "-fPIC") ++ elfBindsLocally
+    val linker =
+      if (isCppRuntimeRequired(config, analysis)) config.clangPP
+      else config.clang
+    val command =
+      Seq(linker.abs) ++ compileFlags ++ linkFlags ++
+        irPaths.map(_.abs) ++ Seq(sections.abs, "-o", output.abs) ++
+        config.linkingOptions
+    config.logger.running(command)
+    val result = Processes.run(
+      command,
+      config.workDir.toFile(),
+      Logger.toCompilerProcessLogger(config.logger)
+    )
+    if (result != 0)
+      throw new BuildException(s"Failed to compile and link extension $output")
+    output
+  }
+
+  /** An ELF extension binds its own definitions to itself. Every extension
+   *  defines `__scalanative_ext_descriptor` and its other generated symbols
+   *  under the same names, with default visibility, and chained extensions (the
+   *  REPL's lines) are loaded with `RTLD_GLOBAL`: without this, line 2's
+   *  references to them would bind to line 1's, which is earlier in the global
+   *  scope. A Mach-O bundle binds them to itself already.
+   */
+  private def elfBindsLocally(implicit config: Config): Seq[String] =
+    if (config.targetsWindows) Nil else Seq("-Wl,-Bsymbolic")
 
   private def optionalPICflag(implicit config: Config): Seq[String] =
     if (config.targetsWindows) Nil

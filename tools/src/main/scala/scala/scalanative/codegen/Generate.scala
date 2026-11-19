@@ -27,14 +27,101 @@ private[codegen] object Generate {
   ) {
     val buf = mutable.UnrolledBuffer.empty[nir.Defn]
 
-    def generate(): Seq[nir.Defn] = {
-      genDefnsExcludingGenerated()
-      genInjects()
-      entry.fold(genLibraryInit())(genMain(_))
-      genTypeMetadata()
-      genModuleAccessors()
+    def generate(): Seq[nir.Defn] = meta.live match {
+      case ext: LiveMetadata.Extension =>
+        // An extension has no entry point and none of the program's tables,
+        // which are the host's. It emits its own classes and modules, and a
+        // descriptor for the loader
+        genDefnsExcludingGenerated()
+        buf ++= Lower.injects
+        genTypeMetadata()
+        genModuleAccessors()
+        genExtensionDescriptor(ext)
+        buf.toSeq
+      case _ =>
+        genDefnsExcludingGenerated()
+        genInjects()
+        entry.fold(genLibraryInit())(genMain(_))
+        genTypeMetadata()
+        genModuleAccessors()
 
-      buf.toSeq
+        buf.toSeq
+    }
+
+    /** The descriptor the loader reads. `ExtDescriptor` in nativelib's `ext_loader.c` declares the same layout.
+     *
+     *  RTTI depends only on a type and its ancestors, so an extension's classes are complete when it is linked: their
+     *  lineages and itables name the host's RTTI where they extend or implement the host's types. The loader checks the
+     *  host, registers the extension's static storage (`__scalanative_ext_sections`) and runs its static initializers;
+     *  the descriptor lists its classes, which no other extension may define, and its modules.
+     */
+    def genExtensionDescriptor(ext: LiveMetadata.Extension): Unit = {
+      def cstring(s: String): nir.Val =
+        nir.Val.Const(nir.Val.ByteString(s.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+      def array(ty: nir.Type, values: Seq[nir.Val]): nir.Val =
+        if (values.isEmpty) nir.Val.Null
+        else nir.Val.Const(nir.Val.ArrayValue(ty, values))
+
+      val classEntryTy = nir.Type.StructValue(Seq(nir.Type.Ptr, nir.Type.Ptr))
+      val classes = meta.classes.map { cls =>
+        nir.Val.StructValue(Seq(meta.rtti(cls).const, cstring(cls.name.id)))
+      }
+      val moduleEntryTy = nir.Type.StructValue(Seq(nir.Type.Ptr, nir.Type.Ptr, nir.Type.Ptr))
+      val modules = meta.classes.filter(cls => cls.isModule && cls.allocated).map { cls =>
+        val constant = meta.isConstantModule(cls)
+        nir.Val.StructValue(
+          Seq(
+            cstring(cls.name.id),
+            if (constant) nir.Val.Null
+            else nir.Val.Global(cls.name.member(nir.Sig.Generated("load")), nir.Type.Ptr),
+            if (!constant) nir.Val.Null
+            else nir.Val.Global(cls.name.member(nir.Sig.Generated("instance")), nir.Type.Ptr)
+          )
+        )
+      }
+
+      // Static initializers, run once after the extension is loaded
+      val clinits = defns.collect {
+        case defn @ nir.Defn.Define(_, name: nir.Global.Member, _, _, _) if name.sig.isClinit => defn
+      }
+      val init =
+        if (clinits.isEmpty) nir.Val.Null
+        else {
+          implicit val fresh: nir.Fresh = nir.Fresh()
+          buf += nir.Defn.Define(
+            nir.Attrs.None,
+            extensionInitName,
+            nir.Type.Function(Seq.empty, nir.Type.Unit),
+            Seq(nir.Inst.Label(fresh(), Nil)) ++
+              genClassInitializersCalls(() => nir.Next.None) ++
+              Seq(nir.Inst.Ret(nir.Val.Unit))
+          )
+          nir.Val.Global(extensionInitName, nir.Type.Ptr)
+        }
+
+      // Its global objects, class objects and string literals, see LiveSections
+      val sectionsTy = nir.Type.ArrayValue(nir.Type.StructValue(Seq(nir.Type.Ptr, nir.Type.Ptr)), 3)
+      buf += nir.Defn.Var(
+        nir.Attrs.None.withIsExtern(true),
+        extensionSectionsName,
+        sectionsTy,
+        nir.Val.Zero(sectionsTy)
+      )
+
+      val descriptor = nir.Val.StructValue(
+        Seq(
+          nir.Val.Int(ExtensionDescriptorMagic),
+          nir.Val.Int(ExtensionDescriptorVersion),
+          cstring(ext.hostHash),
+          nir.Val.Int(classes.size),
+          array(classEntryTy, classes),
+          nir.Val.Int(modules.size),
+          array(moduleEntryTy, modules),
+          init,
+          nir.Val.Global(extensionSectionsName, nir.Type.Ptr)
+        )
+      )
+      buf += nir.Defn.Const(nir.Attrs.None, extensionDescriptorName, descriptor.ty, descriptor)
     }
 
     def genDefnsExcludingGenerated(): Unit = {
@@ -272,7 +359,7 @@ private[codegen] object Generate {
           val cond = nir.Val.Local(fresh(), nir.Type.Bool)
           val alloc = nir.Val.Local(fresh(), clsTy)
 
-          if (cls.isConstantModule) {
+          if (meta.isConstantModule(cls)) {
             val moduleTyName = name.member(nir.Sig.Generated("type"))
             val moduleTyVal = nir.Val.Global(moduleTyName, nir.Type.Ptr)
             val instanceName = name.member(nir.Sig.Generated("instance"))
@@ -466,6 +553,13 @@ private[codegen] object Generate {
       RegisterReflectiveProxiesSig
     )
     val RegisterReflectiveProxies = nir.Val.Global(RegisterReflectiveProxiesDecl.name, nir.Type.Ptr)
+
+    val extensionDescriptorName = Extern("__scalanative_ext_descriptor")
+    val extensionInitName = Extern("__scalanative_ext_init")
+    // Defined by the C code every extension link compiles in (LiveSections)
+    val extensionSectionsName = Extern("__scalanative_ext_sections")
+    final val ExtensionDescriptorMagic = 0x58454e53 // "SNEX", little-endian
+    final val ExtensionDescriptorVersion = 3
 
   }
 

@@ -183,8 +183,8 @@ private[interflow] trait Eval { self: Interflow =>
             emit(nir.Op.Call(dsig, mtarget, margs))
           }
 
-          (dtarget, eargs) match {
-            case (nir.Val.Global(name: nir.Global.Member, _), _)
+          (dtarget, eargs, dsig) match {
+            case (nir.Val.Global(name: nir.Global.Member, _), _, _)
                 if shallInline(name, eargs) =>
               `inline`(name, eargs)
             case PolyInlined(polyInlined) =>
@@ -314,27 +314,39 @@ private[interflow] trait Eval { self: Interflow =>
           else realType
         }
 
-        val targets = objty match {
+        // None: the call stays virtual because the host dispatches it
+        // virtually (a receiver of a host type in an extension link)
+        val targets: Option[Iterable[nir.Global.Member]] = objty match {
           case nir.Type.Null =>
-            Seq.empty
+            Some(Seq.empty)
           case ExactClassRef(cls, _) =>
-            cls.resolve(sig).toSeq
+            Some(cls.resolve(sig).toSeq)
           case ClassRef(cls) if !sig.isVirtual =>
-            cls.resolve(sig).toSeq
+            Some(cls.resolve(sig).toSeq)
+          case ScopeRef(scope) if isHostScope(scope) =>
+            hostDispatch.get(scope, sig) match {
+              case live.Dispatch.Direct(target) => Some(target.toSeq)
+              case _                            => None
+            }
           case ScopeRef(scope) =>
-            scope.targets(sig)
+            Some(scope.targets(sig))
           case _ =>
             bailOut
         }
 
-        if (targets.size == 0) {
-          emit(nir.Op.Method(materialize(obj), sig))
-          nir.Val.Zero(nir.Type.Nothing)
-        } else if (targets.size == 1) {
-          nir.Val.Global(targets.head, nir.Type.Ptr)
-        } else {
-          targets.foreach(visitRoot)
-          delay(nir.Op.Method(materialize(obj), sig))
+        targets match {
+          case Some(targets) if targets.size == 0 =>
+            emit(nir.Op.Method(materialize(obj), sig))
+            nir.Val.Zero(nir.Type.Nothing)
+          // A phantom target stands for extension code: no devirtualization
+          case Some(targets)
+              if targets.size == 1 && !analysis.isPhantom(targets.head) =>
+            nir.Val.Global(targets.head, nir.Type.Ptr)
+          case Some(targets) =>
+            targets.foreach(visitRoot)
+            delay(nir.Op.Method(materialize(obj), sig))
+          case None =>
+            delay(nir.Op.Method(materialize(obj), sig))
         }
       case nir.Op.Dynmethod(obj, dynsig) =>
         analysis.dynimpls.foreach {
@@ -1042,7 +1054,11 @@ private[interflow] trait Eval { self: Interflow =>
     offset >= 0 && offset < length
   }
 
-  private def isPureModule(clsName: nir.Global.Top): Boolean = {
+  private def isPureModule(clsName: nir.Global.Top): Boolean =
+    // An extension does not see the constructors of its host's modules
+    !hostDispatch.exists(_.isHostOwned(clsName)) && isPureModule0(clsName)
+
+  private def isPureModule0(clsName: nir.Global.Top): Boolean = {
     var visiting = List[nir.Global.Top]()
 
     def isPureModule(clsName: nir.Global.Top): Boolean = {

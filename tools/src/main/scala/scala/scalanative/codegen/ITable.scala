@@ -124,18 +124,24 @@ private[codegen] object ITable {
     }
   }
 
-  private def methods(cls: linker.Class, trt: linker.Trait): nir.Val =
-    if (trt.methods.isEmpty) nir.Val.Null
+  // In the order of meta.traitMethods: the host's for a host trait in an
+  // extension link
+  private def methods(cls: linker.Class, trt: linker.Trait)(implicit
+      meta: Metadata
+  ): nir.Val = {
+    val sigs = meta.traitMethods(trt)
+    if (sigs.isEmpty) nir.Val.Null
     else
       nir.Val.Const(
         nir.Val.ArrayValue(
           nir.Type.Ptr,
-          trt.methods.map { sig =>
+          sigs.map { sig =>
             cls
               .resolve(sig)
               .map(nir.Val.Global(_, nir.Type.Ptr))
-              .getOrElse(nir.Val.Null)
+              .getOrElse(meta.live.missingImplementation(cls, sig))
           }
         )
       )
+  }
 }

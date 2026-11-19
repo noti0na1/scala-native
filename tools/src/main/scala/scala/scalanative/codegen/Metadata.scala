@@ -13,6 +13,9 @@ private[scalanative] class Metadata(
   def config: build.NativeConfig = buildConfig.compilerConfig
   private implicit def self: Metadata = this
 
+  /** How this link's live-execution role changes the metadata. */
+  val live: LiveMetadata = LiveMetadata(this)
+
   final val usesLockWords = platform.isMultithreadingEnabled
   val lockWordType = if (usesLockWords) Some(nir.Type.Ptr) else None
   private[codegen] val lockWordVals = lockWordType.map(_ => nir.Val.Null).toList
@@ -26,13 +29,29 @@ private[scalanative] class Metadata(
 
   // Superclasses from the root, then the class itself, see lineage
   private val lineages = mutable.Map.empty[Class, Vector[Class]]
-  val classes: Seq[Class] = initClasses()
-  val traits: Seq[Trait] = analysis.infos.valuesIterator
+
+  /** Every class with metadata. In an extension link, the host's classes too,
+   *  whose layouts and dispatch tables its code uses.
+   */
+  val allClasses: Seq[Class] = initClasses()
+
+  /** The classes this link emits RTTI for: in an extension link, its own. */
+  val classes: Seq[Class] = live match {
+    case ext: LiveMetadata.Extension => allClasses.filterNot(ext.isHostOwned)
+    case _                           => allClasses
+  }
+  val allTraits: Seq[Trait] = analysis.infos.valuesIterator
     .collect { case info: Trait => info }
     .toIndexedSeq
     .sortBy(_.name.mangle)
+
+  /** The traits this link emits RTTI for: in an extension link, its own. */
+  val traits: Seq[Trait] = live match {
+    case ext: LiveMetadata.Extension => allTraits.filterNot(ext.isHostOwned)
+    case _                           => allTraits
+  }
   private val traitKeys: Map[Trait, Int] =
-    traits.map(trt => trt -> StableHash.traitKey(trt)).toMap
+    allTraits.map(trt => trt -> StableHash.traitKey(trt)).toMap
 
   checkDynsigKeys()
   initTraitMetadata()
@@ -82,18 +101,40 @@ private[scalanative] class Metadata(
    *  lookup starts, so a single probe decides any lookup. A whole-program fact
    *  used by generated code only: RTTI does not record it.
    */
-  def alwaysAtHomeSlot(trt: Trait): Boolean = !displacedTraits.contains(trt)
+  def alwaysAtHomeSlot(trt: Trait): Boolean =
+    live.knowsItables(trt) && !displacedTraits.contains(trt)
 
   /** Largest number of slots, in any class of the program, between the slot
    *  where the lookup of `trt` starts and the one holding it. A whole-program
    *  fact used by generated code.
    */
-  def maxDisplacement(trt: Trait): Int = displacedTraits.getOrElse(trt, 0)
+  def maxDisplacement(trt: Trait): Int =
+    if (!live.knowsItables(trt)) Int.MaxValue
+    else displacedTraits.getOrElse(trt, 0)
 
   /** No class of the program shifts the key of `trt` in its itable, so lookups
    *  start at key & mask. A whole-program fact used by generated code.
    */
-  def neverShifted(trt: Trait): Boolean = !shiftedTraits.contains(trt)
+  def neverShifted(trt: Trait): Boolean =
+    live.knowsItables(trt) && !shiftedTraits.contains(trt)
+
+  /** The methods of a trait in itable order: the host's order for a host trait
+   *  in an extension link.
+   */
+  def traitMethods(trt: Trait): Seq[nir.Sig] = live match {
+    case ext: LiveMetadata.Extension if ext.isHostOwned(trt) =>
+      ext.hostTraitMethods(trt)
+    case _ => trt.methods
+  }
+
+  /** Whether a module's instance is a constant: the host's answer for a host
+   *  module in an extension link.
+   */
+  def isConstantModule(cls: Class): Boolean = live match {
+    case ext: LiveMetadata.Extension if ext.isHostOwned(cls) =>
+      ext.manifestClass(cls).isConstantModule
+    case _ => cls.isConstantModule(analysis)
+  }
 
   /** Key of a trait in itables, see StableHash.traitKey */
   def traitKey(trt: Trait): Int = traitKeys(trt)
@@ -113,8 +154,12 @@ private[scalanative] class Metadata(
       out += node
       val lineage = parentLineage :+ node
       lineages(node) = lineage
+      // Not the phantom subclasses of open classes (live execution), which
+      // stand for extension classes and get no metadata
       node.subclasses
-        .filter(_.parent.contains(node))
+        .filter(sub =>
+          sub.parent.contains(node) && !analysis.isPhantom(sub.name)
+        )
         .toSeq
         .sortBy(_.name.mangle)
         .foreach(loop(_, lineage))
@@ -144,16 +189,17 @@ private[scalanative] class Metadata(
   }
 
   def initClassMetadata(): Unit = {
-    classes.foreach { node =>
+    allClasses.foreach { node =>
       vtable(node) = new VirtualTable(node)
       layout(node) = new FieldLayout(node)
-      itable(node) = ITable.build(node)
+      // A host class's itable is the host's: an extension never emits it
+      if (!live.isHostOwned(node)) itable(node) = ITable.build(node)
       rtti(node) = new RuntimeTypeInformation(node)
     }
   }
 
   def initTraitMetadata(): Unit = {
-    traits.foreach { node =>
+    allTraits.foreach { node =>
       rtti(node) = new RuntimeTypeInformation(node)
     }
   }

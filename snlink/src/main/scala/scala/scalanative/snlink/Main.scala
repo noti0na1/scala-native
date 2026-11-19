@@ -48,7 +48,9 @@ object Main {
       cppOptions: Vector[String] = Vector.empty,
       defaultCompileOptions: Boolean = true,
       defaultLinkingOptions: Boolean = true,
-      logLevel: LogLevel = LogLevel.Info
+      logLevel: LogLevel = LogLevel.Info,
+      // Live execution
+      live: LiveOptions = LiveOptions()
   )
 
   private val usage =
@@ -87,7 +89,8 @@ object Main {
       |  -q, --quiet                   same as --log-level warn
       |  -v, --verbose                 same as --log-level debug
       |  --version                     print the Scala Native version and exit
-      |  -h, --help                    print this help""".stripMargin
+      |  -h, --help                    print this help""".stripMargin +
+      LiveOptions.usage
 
   def main(args: Array[String]): Unit = {
     val options =
@@ -106,7 +109,11 @@ object Main {
     }
 
     val logger = Main.logger(options.logLevel)
-    exitOnBuildError(logger)(link(options, logger))
+    exitOnBuildError(logger) {
+      if (options.live.dumpManifest.nonEmpty || options.live.extension)
+        runLive(options, logger)
+      else link(options, logger)
+    }
   }
 
   /** Runs `build`; a failed build (clang's errors are already logged) or link
@@ -206,6 +213,8 @@ object Main {
           acc.serviceProviders + (service -> providers)
         )
       )
+    case LiveOptions.Parse(live, rest) =>
+      parse(rest, acc.copy(live = live(acc.live)))
     case ("-h" | "--help") :: _ => acc.copy(help = true)
     case "--version" :: _       => acc.copy(version = true)
     case option :: rest if toolchainOptions.contains(option) =>
@@ -224,8 +233,15 @@ object Main {
   /** The options `args` give, or a `UsageError`. */
   private[snlink] def parseArgs(args: List[String]): Options = {
     val options = parse(args, Options())
-    if (options.help || options.version) options
-    else if (options.classPath.isEmpty) fail("no class path entries")
+    val live = options.live
+    if (options.help || options.version || live.dumpManifest.nonEmpty)
+      options
+    else if (live.extension) {
+      if (live.hostManifest.isEmpty) fail("--extension needs --host <manifest>")
+      else if (live.roots.isEmpty)
+        fail("--extension needs at least one --ext entry")
+      else options
+    } else if (options.classPath.isEmpty) fail("no class path entries")
     else if (options.mainClass.isEmpty &&
         options.buildTarget == BuildTarget.application)
       fail("--main is required to link an application")
@@ -394,5 +410,156 @@ object Main {
       .withSourceLevelDebuggingConfig(_.enabled(options.debugInfo))
       .withTargetTriple(options.targetTriple)
       .withServiceProviders(options.serviceProviders)
+      .withLiveExecution(options.live.host)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live execution: host links with open and callable types, and extension
+  // links against a host's manifest. Kept apart from the options above.
+  // ---------------------------------------------------------------------------
+
+  private[snlink] case class LiveOptions(
+      open: Vector[String] = Vector.empty,
+      callable: Vector[String] = Vector.empty,
+      extension: Boolean = false,
+      hostManifest: Option[Path] = None,
+      hostBinary: Option[Path] = None,
+      roots: Vector[Path] = Vector.empty,
+      dumpManifest: Option[Path] = None,
+      // Chained extensions and hosts whose boundary is everything (the REPL)
+      chain: Vector[Path] = Vector.empty,
+      delta: Option[Path] = None,
+      stubUnlinkable: Boolean = false
+  ) {
+    def host: LiveExecution =
+      if (open.isEmpty && callable.isEmpty) LiveExecution.Disabled
+      else
+        LiveExecution.Host(
+          open = open,
+          callable = callable,
+          stubUnlinkable = stubUnlinkable
+        )
+  }
+
+  private[snlink] object LiveOptions {
+    val usage =
+      """|
+         |
+         |live execution, host:
+         |  --open <pattern>              classes and traits extensions may subclass or
+         |                                implement (repeatable; `pkg.*` for a prefix)
+         |  --callable <pattern>          classes kept callable by extensions with all
+         |                                their methods (repeatable)
+         |
+         |live execution, extension:
+         |  snlink --extension --host <manifest> --ext <entry>... [options] <classpath entry>...
+         |  --extension                   link an extension bundle against a host
+         |  --host <manifest>             the host's manifest (<host binary>.snm)
+         |  --host-binary <path>          the host executable (from the manifest if absent)
+         |  --ext <entry>                 class path entry whose classes make up the
+         |                                extension (repeatable)
+         |  --dump-manifest <manifest>    print a manifest and exit
+         |
+         |live execution, chained extensions and hosts whose boundary is everything:
+         |  --stub-unlinkable             host or extension: methods whose code does not
+         |                                link become stubs that throw, instead of
+         |                                failing the link
+         |  --chain <delta>               extension: link against an earlier extension's
+         |                                delta too (repeatable, in load order)
+         |  --delta <path>                extension: write this extension's delta, so
+         |                                that later extensions can link against it""".stripMargin
+
+    object Parse {
+      def unapply(
+          args: List[String]
+      ): Option[(LiveOptions => LiveOptions, List[String])] = args match {
+        case "--open" :: p :: rest =>
+          Some((o => o.copy(open = o.open :+ p), rest))
+        case "--callable" :: p :: rest =>
+          Some((o => o.copy(callable = o.callable :+ p), rest))
+        case "--extension" :: rest =>
+          Some((o => o.copy(extension = true), rest))
+        case "--host" :: m :: rest =>
+          Some((o => o.copy(hostManifest = Some(abs(m))), rest))
+        case "--host-binary" :: b :: rest =>
+          Some((o => o.copy(hostBinary = Some(abs(b))), rest))
+        case "--ext" :: e :: rest =>
+          Some((o => o.copy(roots = o.roots :+ abs(e)), rest))
+        case "--dump-manifest" :: m :: rest =>
+          Some((o => o.copy(dumpManifest = Some(abs(m))), rest))
+        case "--stub-unlinkable" :: rest =>
+          Some((o => o.copy(stubUnlinkable = true), rest))
+        case "--chain" :: d :: rest =>
+          Some((o => o.copy(chain = o.chain :+ abs(d)), rest))
+        case "--delta" :: d :: rest =>
+          Some((o => o.copy(delta = Some(abs(d))), rest))
+        case _ => None
+      }
+    }
+
+    private def abs(p: String): Path = Paths.get(p).toAbsolutePath()
+  }
+
+  /** Prints a manifest, or links an extension: `parseArgs` checked that an
+   *  extension link has `--host` and `--ext`. The GC and multithreading come
+   *  from the host's manifest, and so does the mode unless `--mode` is given;
+   *  the discovered default linking options do not apply to an extension.
+   */
+  private def runLive(options: Options, logger: Logger): Unit = {
+    val live = options.live
+    live.dumpManifest match {
+      case Some(path) =>
+        print(scala.scalanative.live.Manifest.read(path).show)
+      case None =>
+        val config = extensionConfig(options, logger, new Discovered(logger))
+        Scope { implicit scope =>
+          val artifact = Build.buildCachedAwait(config)
+          println(artifact)
+        }
+    }
+  }
+
+  /** The configuration of an extension link. */
+  private[snlink] def extensionConfig(
+      options: Options,
+      logger: Logger,
+      defaults: Defaults
+  ): Config = {
+    val live = options.live
+    val manifestPath = live.hostManifest.get
+    val manifest = scala.scalanative.live.Manifest.read(manifestPath)
+    val compileOptions =
+      if (options.defaultCompileOptions) defaults.compileOptions() else Nil
+    val nativeConfig = NativeConfig.empty
+      .withClang(options.clang.getOrElse(defaults.clang()))
+      .withClangPP(options.clangPP.getOrElse(defaults.clangPP()))
+      .withCompileOptions(compileOptions ++ options.compileOptions)
+      .withCOptions(options.cOptions)
+      .withCppOptions(options.cppOptions)
+      .withLinkingOptions(options.linkingOptions)
+      .withMode(options.mode.getOrElse(Mode(manifest.header.mode)))
+      .withGC(GC(manifest.header.gc))
+      .withOptimize(options.optimize.getOrElse(defaults.optimize()))
+      .withMultithreading(manifest.header.multithreading)
+      .withCheck(options.check || options.checkFatalWarnings)
+      .withCheckFatalWarnings(options.checkFatalWarnings)
+      .withSourceLevelDebuggingConfig(_.enabled(options.debugInfo))
+      .withTargetTriple(options.targetTriple)
+      .withLiveExecution(
+        LiveExecution.Extension(
+          hostManifest = manifestPath,
+          roots = live.roots,
+          hostBinary = live.hostBinary,
+          chain = live.chain,
+          delta = live.delta,
+          stubUnlinkable = live.stubUnlinkable
+        )
+      )
+    Config.empty
+      .withLogger(logger)
+      .withBaseDir(options.baseDir)
+      .withModuleName(options.moduleName)
+      .withClassPath((live.roots ++ options.classPath).distinct)
+      .withCompilerConfig(nativeConfig)
   }
 }

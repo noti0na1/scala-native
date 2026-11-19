@@ -9,9 +9,11 @@ import scala.collection.mutable
 private[linker] class Reach(
     protected val config: build.Config,
     entries: Seq[nir.Global],
-    protected val loader: ClassLoader
+    protected val loader: ClassLoader,
+    retained: Option[Reach.Retained] = None
 ) extends LinktimeValueResolver
-    with LinktimeIntrinsicCallsResolver {
+    with LinktimeIntrinsicCallsResolver
+    with LiveReach {
   import Reach._
 
   val loaded =
@@ -52,6 +54,21 @@ private[linker] class Reach(
 
   entries.foreach(reachEntry(_)(nir.SourcePosition.NoPosition))
 
+  retained.foreach { kept =>
+    implicit val pos: nir.SourcePosition = nir.SourcePosition.NoPosition
+    kept.scopes.foreach(reachGlobal)
+    kept.fields.foreach(reachGlobal)
+    kept.allocated.foreach { name =>
+      classInfo(name).foreach { cls =>
+        reachAllocation(cls)(cls.position)
+        if (cls.isModule) {
+          val init = name.member(nir.Sig.Ctor(Seq.empty))
+          if (loaded(name).contains(init)) reachGlobal(init)(cls.position)
+        }
+      }
+    }
+  }
+
   // Internal hack used inside linker tests, for more information
   // check out comment in scala.scalanative.linker.ReachabilitySuite
   val reachStaticConstructors = sys.props
@@ -59,13 +76,29 @@ private[linker] class Reach(
     .flatMap(v => scala.util.Try(v.toBoolean).toOption)
     .forall(_ == true)
 
-  loader.classesWithEntryPoints.foreach { clsName =>
-    if (reachStaticConstructors)
-      reachClinit(clsName)(nir.SourcePosition.NoPosition)
-    config.compilerConfig.buildTarget match {
-      case build.BuildTarget.Application => ()
-      case _                             => reachExported(clsName)
-    }
+  liveExtension match {
+    case Some(ext)
+        if config.compilerConfig.buildTarget == build.BuildTarget.Application =>
+      // An extension handles the entry points of its own classes only
+      // (ownsEntryPoints), which are its entries: their static constructors,
+      // without reading every class path entry for entry points
+      if (reachStaticConstructors)
+        ext.rootClasses.toSeq.sortBy(_.id).foreach { clsName =>
+          val clinit = clsName.member(nir.Sig.Clinit)
+          if (loader.load(clsName).exists(_.exists(_.name == clinit)))
+            reachClinit(clsName)(nir.SourcePosition.NoPosition)
+        }
+    case _ =>
+      loader.classesWithEntryPoints.foreach { clsName =>
+        if (ownsEntryPoints(clsName)) {
+          if (reachStaticConstructors)
+            reachClinit(clsName)(nir.SourcePosition.NoPosition)
+          config.compilerConfig.buildTarget match {
+            case build.BuildTarget.Application => ()
+            case _                             => reachExported(clsName)
+          }
+        }
+      }
   }
 
   def result(): ReachabilityAnalysis = {
@@ -97,7 +130,7 @@ private[linker] class Reach(
     if (unreachable.isEmpty && unsupported.isEmpty)
       new ReachabilityAnalysis.Result(
         infos = infos,
-        entries = (entries ++ exports.toSeq).distinct,
+        entries = (entries ++ exports.toSeq ++ boundaryRoots).distinct,
         links = links.toSeq,
         linkCppRuntime = linkCppRuntime,
         preprocessorDefinitions = preprocessorDefinitions.toSeq.sortBy(_.name),
@@ -105,7 +138,11 @@ private[linker] class Reach(
         dynsigs = dynsigs.toSeq.sortBy(_.mangle),
         dynimpls = dynimpls.toSeq.sorted(nir.Global.globalOrdering),
         resolvedVals = resolvedNirValues,
-        foundServiceProviders = foundServiceProviders
+        foundServiceProviders = foundServiceProviders,
+        phantoms = phantomTops.toSet,
+        openScopes = openScopes.toSeq,
+        unknownSubclasses = unknownSubclasses,
+        hostTargets = hostTargets
       )
     else
       new ReachabilityAnalysis.Failure(
@@ -167,6 +204,7 @@ private[linker] class Reach(
 
       case _ => ()
     }
+    cleanupPhantoms()
   }
 
   def lookup(global: nir.Global): Option[nir.Defn] =
@@ -220,10 +258,14 @@ private[linker] class Reach(
           def addMissing() = this.addMissing(top.member(sig))
           scopeInfo(top)(position).fold(addMissing()) { info =>
             val wasAllocated = info match {
-              case value: Trait => value.implementors.exists(_.allocated)
+              case value: Trait => value.implementors.exists(isAllocatedForReal)
               case clazz: Class => clazz.allocated
             }
-            val targets = info.targets(sig)
+            val targets = {
+              val all = info.targets(sig)
+              // The same targets in the same order, without phantoms
+              if (phantomTops.isEmpty) all else all.filterNot(isPhantom)
+            }
             if (targets.isEmpty && wasAllocated) {
               addMissing()
             } else {
@@ -245,6 +287,8 @@ private[linker] class Reach(
     } { defn =>
       if (defn.attrs.isStub && !config.linkStubs) {
         reachUnavailable(name)
+      } else if (isFieldTheHostLacks(defn)) {
+        reachUnavailable(name)
       } else {
         reachDefn(defn)
       }
@@ -253,7 +297,7 @@ private[linker] class Reach(
   }
 
   def reachDefn(defninition: nir.Defn): Unit = {
-    val defn = preprocessDefn(defninition)
+    val defn = preprocessDefn(asHostDeclaration(defninition))
     implicit val srcPosition = defn.pos
     defn match {
       case defn: nir.Defn.Var =>
@@ -276,6 +320,11 @@ private[linker] class Reach(
         reachModule(defn)
     }
     done(defn.name) = defn
+    defn match {
+      case _: nir.Defn.Class | _: nir.Defn.Module | _: nir.Defn.Trait =>
+        processPendingOpen()
+      case _ => ()
+    }
   }
 
   private def preprocessDefn(defn: nir.Defn): nir.Defn = {
@@ -327,7 +376,9 @@ private[linker] class Reach(
     reachGlobalNow(clsName)
     infos.get(clsName).foreach { cls =>
       val clinit = clsName.member(nir.Sig.Clinit)
-      if (loaded(clsName).contains(clinit)) {
+      // Not loaded when it is unavailable: a host link that stubs code that
+      // does not link leaves out a class whose parent is missing
+      if (loaded.get(clsName).exists(_.contains(clinit))) {
         reachGlobal(clinit)(cls.position)
       }
     }
@@ -344,7 +395,7 @@ private[linker] class Reach(
       case _ => false
     }
 
-    for {
+    if (ownsEntryPoints(name)) for {
       cls <- infos.get(name).collect { case info: ScopeInfo => info }
       defns <- loaded.get(cls.name)
       (name, defn) <- defns
@@ -357,7 +408,8 @@ private[linker] class Reach(
   def reachGlobal(
       name: nir.Global
   )(implicit srcPosition: nir.SourcePosition): Unit =
-    if (!enqueued.contains(name) && name.ne(nir.Global.None)) {
+    if (!enqueued.contains(name) && name.ne(nir.Global.None) &&
+        !isPhantom(name)) {
       enqueued += name
       track(name)
       todo ::= name
@@ -366,7 +418,7 @@ private[linker] class Reach(
   def reachGlobalNow(
       name: nir.Global
   )(implicit srcPosition: nir.SourcePosition): Unit =
-    if (done.contains(name)) {
+    if (done.contains(name) || isPhantom(name)) {
       ()
     } else if (!stack.contains(name)) {
       enqueued += name
@@ -467,11 +519,16 @@ private[linker] class Reach(
       case _ =>
         ()
     }
+    info match {
+      case info: ScopeInfo => onNewScope(info)
+      case _               => ()
+    }
   }
 
   def reachAllocation(
       info: Class
-  )(implicit srcPosition: nir.SourcePosition): Unit =
+  )(implicit srcPosition: nir.SourcePosition): Unit = {
+    checkHostAllocation(info)
     if (info.allocated) info.allocations += 1
     else {
       info.allocations += 1
@@ -496,9 +553,10 @@ private[linker] class Reach(
       calls.foreach { sig =>
         def respondImpl = info.responds.get(sig)
         def defaultImpl = info.defaultResponds.get(sig)
-        respondImpl
-          .orElse(defaultImpl)
-          .foreach(reachGlobal)
+        if (!skipMadeUpCall(info, sig))
+          respondImpl
+            .orElse(defaultImpl)
+            .foreach(reachGlobal)
       }
 
       // 1. Handle all dynamic methods on this class.
@@ -531,6 +589,7 @@ private[linker] class Reach(
           ()
       }
     }
+  }
 
   def scopeInfo(
       name: nir.Global.Top
@@ -865,15 +924,23 @@ private[linker] class Reach(
       reachVal(obj)
       reachMethodTargets(obj.ty, sig)
     case nir.Op.Dynmethod(obj, dynsig) =>
+      checkDynamicCall()
       reachVal(obj)
       reachDynamicMethodTargets(dynsig)
     case nir.Op.Module(n) =>
-      classInfo(n).foreach(reachAllocation)
-      val init = n.member(nir.Sig.Ctor(Seq.empty))
-      loaded.get(n).fold(addMissing(n)) { defn =>
-        if (defn.contains(init)) {
-          reachGlobal(init)
-        }
+      classInfo(n) match {
+        case Some(cls) if !cls.isModule =>
+          missingModule(n)
+        case None if infos.get(n).exists(_.isInstanceOf[Trait]) =>
+          missingModule(n)
+        case info =>
+          info.foreach(reachAllocation)
+          val init = n.member(nir.Sig.Ctor(Seq.empty))
+          loaded.get(n).fold(addMissing(n)) { defn =>
+            if (defn.contains(init)) {
+              reachGlobal(init)
+            }
+          }
       }
     case nir.Op.As(ty, v) =>
       reachType(ty)
@@ -932,8 +999,9 @@ private[linker] class Reach(
         reachMethodTargets(nir.Type.Ref(nir.Type.toArrayClass(ty)), sig)
       case nir.Type.Ref(name, _, _) =>
         scopeInfo(name).foreach { scope =>
-          if (!scope.calls.contains(sig)) {
+          if (!scope.calls.contains(sig) || promoteMadeUpCall(scope, sig)) {
             scope.calls += sig
+            resolveHostCall(scope, sig)
             val targets = scope.targets(sig)
             if (targets.nonEmpty) targets.foreach(reachGlobal)
             else {
@@ -974,6 +1042,37 @@ private[linker] class Reach(
     }
   }
 
+  /** Extension links: a structural call (`dynmethod`) looks its target up in
+   *  the program's table of reflective proxies, which the host registers when
+   *  it starts: it holds the proxies of the host's classes for the host's own
+   *  structural calls, and none of an extension's. It is an unsupported feature
+   *  in an extension, referred to by the method that makes it.
+   */
+  private def checkDynamicCall()(implicit
+      srcPosition: nir.SourcePosition
+  ): Unit =
+    liveExtension.foreach { _ =>
+      track(LiveReach.StructuralCallsFeature)
+      addMissing(LiveReach.StructuralCallsFeature)
+    }
+
+  /** A `module` instruction that names a class or trait that is not a module.
+   *  The module's accessor, which the instruction is lowered to a call of, does
+   *  not exist, so it is reported missing, as referred to by the method being
+   *  reached. nscplugin emits such code for the lazy-val offset accessors of an
+   *  object nested in a class (MUnit's `munit.diff.Delta$TYPE.OFFSET$_m_0`,
+   *  which loads the class `Delta$TYPE$` as a module): nothing calls them, so a
+   *  closed link never reaches them, but a host link that makes every method
+   *  callable does.
+   */
+  private def missingModule(
+      name: nir.Global.Top
+  )(implicit srcPosition: nir.SourcePosition): Unit = {
+    val load = name.member(nir.Sig.Generated("load"))
+    track(load)
+    addMissing(load)
+  }
+
   protected def addMissing(global: nir.Global): Unit =
     global match {
       case UnsupportedFeatureExtractor(details) =>
@@ -989,7 +1088,7 @@ private[linker] class Reach(
         )
     }
 
-  private def parseSymbol(name: nir.Global): SymbolDescriptor = {
+  private[linker] def parseSymbol(name: nir.Global): SymbolDescriptor = {
     def renderType(tpe: nir.Type): String = tpe match {
       case arr: nir.Type.Array   => s"${renderType(arr.ty)}[]"
       case ref: nir.Type.RefKind => ref.className.id
@@ -1179,6 +1278,8 @@ private[linker] class Reach(
           VirtualThreads
         case nir.Sig.Method("continuations", _, _) =>
           Continuations
+        case nir.Sig.Method("structuralCalls", _, _) =>
+          StructuralCalls
         case _ => Other
       }
     }
@@ -1222,13 +1323,25 @@ private[scalanative] object Reach {
   def apply(
       config: build.Config,
       entries: Seq[nir.Global],
-      loader: ClassLoader
+      loader: ClassLoader,
+      retained: Option[Retained] = None
   ): ReachabilityAnalysis = {
-    val reachability = new Reach(config, entries, loader)
+    val reachability = new Reach(config, entries, loader, retained)
     reachability.process()
     reachability.processDelayed()
+    reachability.checkBoundary()
     reachability.result()
   }
+
+  /** What reachability keeps besides what its entries reach, with nothing
+   *  referring to it: classes, traits and modules, fields, and classes as
+   *  allocated (`Link.hostAfterOptimization`).
+   */
+  final case class Retained(
+      scopes: Seq[nir.Global.Top],
+      fields: Seq[nir.Global.Member],
+      allocated: Seq[nir.Global.Top]
+  )
 
   private[scalanative] case class ReferencedFrom(
       referencedBy: nir.Global,
@@ -1279,6 +1392,10 @@ private[scalanative] object Reach {
         extends Kind("VirtualThreads are not supported yet on this platform")
     case object Continuations
         extends Kind("Continuations are not supported yet on this platform")
+    case object StructuralCalls
+        extends Kind(
+          "Structural calls (reflectiveSelectable) are not supported in extensions: the program's table of reflective proxies is the host's"
+        )
     case object Other extends Kind("Other unsupported feature")
   }
 }

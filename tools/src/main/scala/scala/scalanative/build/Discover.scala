@@ -129,7 +129,17 @@ object Discover {
   private def clangInfo(implicit config: NativeConfig): ClangInfo =
     cache("clang-info")(config => clangInfo(config.clang))
 
-  private def clangInfo(clang: Path): ClangInfo = {
+  // The output of `clang --version` depends only on the binary, so a
+  // long-lived linker (`live.ExtensionLinker`) runs it once per binary, not
+  // once per configuration
+  private val clangInfos = scala.collection.mutable.Map.empty[Path, ClangInfo]
+
+  private def clangInfo(clang: Path): ClangInfo =
+    clangInfos.synchronized {
+      clangInfos.getOrElseUpdate(clang.toAbsolutePath(), readClangInfo(clang))
+    }
+
+  private def readClangInfo(clang: Path): ClangInfo = {
     val versionCommand = Seq(clang.abs, "--version")
     val cmdString = versionCommand.mkString(" ")
     val processLines = Processes.lines(versionCommand)

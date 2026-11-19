@@ -22,6 +22,9 @@ sealed trait ClassPath {
 
   private[scalanative] def classesWithEntryPoints: Iterable[nir.Global.Top]
 
+  /** Every class, trait and module defined in this class path entry. */
+  private[scalanative] def classes: Iterable[nir.Global.Top]
+
   private[scalanative] def definedServicesProviders
       : Map[nir.Global.Top, Seq[nir.Global.Top]]
 }
@@ -65,6 +68,8 @@ object ClassPath {
 
     def contains(name: nir.Global) =
       nirFiles.contains(name.top)
+
+    def classes: Iterable[nir.Global.Top] = nirFiles.keys
 
     def load(name: nir.Global.Top): Option[Seq[nir.Defn]] =
       cache.getOrElseUpdate(

@@ -93,7 +93,9 @@ private[interflow] trait NoOpt { self: Interflow =>
         case refty: nir.Type.RefKind =>
           val name = refty.className
           val scope = analysis.infos(name).asInstanceOf[ScopeInfo]
-          scope.targets(sig).foreach(visitEntry)
+          scope.targets(sig).foreach { target =>
+            if (!analysis.isPhantom(target)) visitEntry(target)
+          }
         case _ =>
           ()
       }

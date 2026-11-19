@@ -46,7 +46,15 @@ private[scalanative] object ScalaNative {
         .getOrElse("detect")
       val linkingMsg = s"Linking (multithreadingEnabled=${mtSupport})"
       config.logger.time(linkingMsg) {
-        Link(config, entries)
+        config.compilerConfig.liveExecution match {
+          case host: LiveExecution.Host if host.stubUnlinkable =>
+            scala.scalanative.live.HostStubs.link(config, entries, host)
+          case host: LiveExecution.Host =>
+            scala.scalanative.live.LiveLink.host(config, entries, host)
+          case ext: LiveExecution.Extension if ext.stubUnlinkable =>
+            scala.scalanative.live.HostStubs.linkExtension(config, entries, ext)
+          case _ => Link(config, entries)
+        }
       }
     }
   )
@@ -66,7 +74,23 @@ private[scalanative] object ScalaNative {
         ) {
           Interflow
             .optimize(config, analysis)
-            .map(Link(config, analysis.entries, _))
+            .map { defns =>
+              config.compilerConfig.liveExecution match {
+                case ext: LiveExecution.Extension =>
+                  // The host's classes are read from the class path again
+                  Scope { implicit scope =>
+                    Link.extension(
+                      config,
+                      analysis.entries,
+                      defns,
+                      scala.scalanative.live.ManifestChain.manifest(ext)
+                    )
+                  }
+                case _: LiveExecution.Host =>
+                  Link.hostAfterOptimization(config, analysis, defns)
+                case _ => Link(config, analysis.entries, defns)
+              }
+            }
         }
       }
     else {

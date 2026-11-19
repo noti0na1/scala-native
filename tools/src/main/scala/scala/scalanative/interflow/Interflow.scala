@@ -194,6 +194,18 @@ private[scalanative] class Interflow(val config: build.Config)(implicit
 
   protected def mode: build.Mode = config.compilerConfig.mode
 
+  /** Extension links: how calls on receivers of host types dispatch. */
+  protected lazy val hostDispatch: Option[live.HostDispatch] =
+    config.compilerConfig.liveExecution match {
+      case ext: build.LiveExecution.Extension =>
+        Some(live.HostDispatch(live.ManifestChain.manifest(ext)))
+      case _ => None
+    }
+
+  /** Whether calls on this receiver type must dispatch as the host does. */
+  protected def isHostScope(scope: ScopeInfo): Boolean =
+    hostDispatch.exists(_.isHostOwned(scope))
+
 }
 
 object Interflow {

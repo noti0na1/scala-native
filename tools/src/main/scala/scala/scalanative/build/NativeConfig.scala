@@ -158,6 +158,11 @@ sealed trait NativeConfig {
   /** List of service providers which shall be allowed in the final binary */
   def serviceProviders: Map[ServiceName, Iterable[ServiceProviderName]]
 
+  /** Live execution: link a host that loads extensions, or an extension for a
+   *  host. Disabled by default.
+   */
+  def liveExecution: LiveExecution
+
   private[scalanative] lazy val configuredOrDetectedTriple =
     TargetTriple.parse(targetTriple.getOrElse(Discover.targetTriple(this)))
 
@@ -332,6 +337,9 @@ sealed trait NativeConfig {
 
   /** Modify a semantics configuration */
   def withSemanticsConfig(update: Mapping[SemanticsConfig]): NativeConfig
+
+  /** Create a new config with the given live-execution role. */
+  def withLiveExecution(value: LiveExecution): NativeConfig
 }
 
 object NativeConfig {
@@ -372,7 +380,8 @@ object NativeConfig {
       baseName = "",
       optimizerConfig = OptimizerConfig.empty,
       sourceLevelDebuggingConfig = SourceLevelDebuggingConfig.disabled,
-      semanticsConfig = SemanticsConfig.default
+      semanticsConfig = SemanticsConfig.default,
+      liveExecution = LiveExecution.Disabled
     )
 
   private final case class Impl(
@@ -405,7 +414,8 @@ object NativeConfig {
       baseName: String,
       optimizerConfig: OptimizerConfig,
       sourceLevelDebuggingConfig: SourceLevelDebuggingConfig,
-      semanticsConfig: SemanticsConfig
+      semanticsConfig: SemanticsConfig,
+      liveExecution: LiveExecution
   ) extends NativeConfig {
 
     def withClang(value: Path): NativeConfig =
@@ -531,6 +541,9 @@ object NativeConfig {
         update: Mapping[SemanticsConfig]
     ): NativeConfig = copy(semanticsConfig = update(semanticsConfig))
 
+    override def withLiveExecution(value: LiveExecution): NativeConfig =
+      copy(liveExecution = value)
+
     override def toString: String = {
       def showSeq(it: Iterable[Any]) = it.mkString("[", ", ", "]")
       def showMap(map: Map[String, Any], indent: Int = 4): String =
@@ -582,6 +595,7 @@ object NativeConfig {
           | - serviceProviders:        ${showMap(serviceProviders)}
           | - optimizerConfig:         ${optimizerConfig.show(" " * 4)}
           | - semanticsConfig:         ${semanticsConfig.show(" " * 4)}
+          | - liveExecution:           $liveExecution
           | - sourceLevelDebuggingConfig: ${sourceLevelDebuggingConfig.show(
            " " * 4
          )}

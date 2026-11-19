@@ -1,6 +1,7 @@
 package scala.scalanative
 package codegen
 
+import scala.scalanative.build.BuildException
 import scalanative.linker.{Class, Field}
 
 private[codegen] class FieldLayout(cls: Class)(implicit meta: Metadata) {
@@ -13,12 +14,40 @@ private[codegen] class FieldLayout(cls: Class)(implicit meta: Metadata) {
   def entries: Seq[Field] = entries0
   def layout: MemoryLayout = layout0
 
+  // A host class in an extension link: its own fields in the host's order
+  private def hostFieldOrder: Option[Seq[String]] = meta.live match {
+    case ext: LiveMetadata.Extension if ext.isHostOwned(cls) =>
+      Some(ext.manifestClass(cls).fields.map(_.name))
+    case _ => None
+  }
+
+  private def ownFields: Seq[Field] = {
+    val own = cls.members.collect { case f: Field => f }.toSeq
+    hostFieldOrder.fold(own) { order =>
+      val byName = own.map(f => f.name.mangle -> f).toMap
+      own.foreach { f =>
+        if (!order.contains(f.name.mangle))
+          throw new BuildException(
+            s"The extension uses field ${f.name.show}, which the host does not keep"
+          )
+      }
+      order.map { name =>
+        byName.getOrElse(
+          name,
+          throw new BuildException(
+            s"Field $name of host class ${cls.name.id} was not loaded"
+          )
+        )
+      }
+    }
+  }
+
   private lazy val (entries0, layout0) = {
     val entries: Seq[Field] = {
       val base = cls.parent.fold {
         Seq.empty[Field]
       } { parent => meta.layout(parent).entries }
-      base ++ cls.members.collect { case f: Field => f }
+      base ++ ownFields
     }
     val usesCustomAlignment = entries.exists(_.attrs.align.isDefined)
     val isArray = nir.Type.isArray(cls.name)
@@ -70,6 +99,17 @@ private[codegen] class FieldLayout(cls: Class)(implicit meta: Metadata) {
         )
       offset
     }
+
+  // The extension's view of a host class must match the host's
+  meta.live match {
+    case ext: LiveMetadata.Extension if ext.isHostOwned(cls) =>
+      val expected = ext.manifestClass(cls).size
+      if (expected != size)
+        throw new BuildException(
+          s"Layout of host class ${cls.name.id}: the host has $expected bytes, the extension computes $size"
+        )
+    case _ => ()
+  }
 
 }
 

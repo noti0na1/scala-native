@@ -260,9 +260,11 @@ private[codegen] abstract class AbstractCodeGen(
     str(" = ")
     val section =
       if (attrs.isExtern) None else meta.globalSections.forGlobal(name)
+    // A host or extension link exports its globals through an export list
     str(
       if (attrs.isExtern) "external "
       else if (section.exists(_.anonymous)) "private "
+      else if (meta.live.isHost || meta.live.isExtension) ""
       else "hidden "
     )
     str(if (isConst) "constant" else "global")
@@ -315,6 +317,7 @@ private[codegen] abstract class AbstractCodeGen(
 
     newline()
     str(if (isDecl) "declare " else "define ")
+    if (!isDecl && meta.live.isCopy(name)) str("hidden ")
     if (targetsWindows && !isDecl && attrs.isExtern) {
       // Generate export modifier only for extern (C-ABI compliant) signatures
       val nir.Global.Member(_, sig) = name: @unchecked

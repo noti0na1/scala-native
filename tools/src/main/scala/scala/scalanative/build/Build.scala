@@ -122,9 +122,151 @@ object Build {
    *  @param config
    *    The configuration of the toolchain.
    *  @return
-   *    [[Config#artifactPath]], the path to the resulting native binary.
+   *    [[Config#artifactPath]], the path to the resulting native binary; for an
+   *    extension link, the path of the extension's loadable module.
    */
   def build(
+      config: Config
+  )(implicit scope: Scope, ec: ExecutionContext): Future[Path] =
+    config.compilerConfig.liveExecution match {
+      case ext: LiveExecution.Extension => buildExtension(config, ext)
+      case _                            => buildProgram(config)
+    }
+
+  /** Links an extension against a host's manifest into a module that the host's
+   *  loader loads: `<module>.bundle` on macOS, `<module>.so` elsewhere. The
+   *  host's runtime and native libraries are not compiled again: the extension
+   *  uses the host's.
+   */
+  private[scalanative] def buildExtension(
+      config: Config,
+      ext: LiveExecution.Extension
+  )(implicit
+      scope: Scope,
+      ec: ExecutionContext
+  ): Future[Path] = {
+    import config.logger
+    logger.timeAsync("Total") {
+      val (extConfig, hostBinary, reached) = reachExtension(config, ext)
+      val output =
+        scala.scalanative.codegen.LiveBoundary.extensionOutput(extConfig)
+      reached
+        .flatMap(optimize(extConfig, _))
+        .flatMap { analysis =>
+          if (ext.isChained)
+            // One clang call compiles and links the bundle
+            ScalaNative
+              .codegen(extConfig, analysis)
+              .flatMap(irGenerators => Future.sequence(irGenerators))
+              .map { irPaths =>
+                logger.time("Compiling and linking extension") {
+                  LLVM.compileAndLinkExtension(
+                    extConfig,
+                    analysis,
+                    irPaths,
+                    output
+                  )
+                }
+              }
+          else
+            ScalaNative
+              .codegen(extConfig, analysis)
+              .flatMap { irGenerators =>
+                logger.timeAsync("Compiling to native code") {
+                  Future.sequence(irGenerators.map(_.flatMap { ir =>
+                    LLVM.compile(extConfig, analysis, ir, configChanged = true)
+                  }))
+                }
+              }
+              .map { objects =>
+                logger.time("Linking extension") {
+                  LLVM.linkExtension(
+                    extConfig,
+                    analysis,
+                    hostBinary,
+                    objects,
+                    output,
+                    chain = ext.chain.nonEmpty
+                  )
+                }
+              }
+        }
+    }
+  }
+
+  /** Runs the reachability analysis of an extension link without compiling: the
+   *  first part of `buildExtension`. It reads the NIR of the classes the link
+   *  reaches, which a linker that stays up between links keeps in
+   *  `linker.ClassPathCache`.
+   */
+  private[scalanative] def reachExtensionOnly(
+      config: Config,
+      ext: LiveExecution.Extension
+  )(implicit scope: Scope, ec: ExecutionContext): Future[Unit] =
+    reachExtension(config, ext)._3.map(_ => ())
+
+  /** An extension link's configuration, with the values its host fixes, the
+   *  host's binary, and the reachability analysis of the extension's classes.
+   */
+  private def reachExtension(
+      config: Config,
+      ext: LiveExecution.Extension
+  )(implicit
+      scope: Scope,
+      ec: ExecutionContext
+  ): (Config, Path, Future[ReachabilityAnalysis.Result]) = {
+    import config.logger
+    checkWorkdirExists(config)
+    val manifest = scala.scalanative.live.Manifest.read(ext.hostManifest)
+    val extConfig = extensionConfig(config, manifest)
+    scala.scalanative.live.LiveLink.checkExtensionConfig(extConfig, manifest)
+    val hostBinary = ext.hostBinary.getOrElse(
+      java.nio.file.Paths.get(manifest.header.hostBinary)
+    )
+    val entries = logger.time("Extension entries") {
+      ScalaNative.entries(extConfig) ++
+        scala.scalanative.live.LiveLink.extensionEntries(extConfig, ext)
+    }
+    (extConfig, hostBinary, ScalaNative.link(extConfig, entries))
+  }
+
+  /** The configuration of an extension of the host that `manifest` describes:
+   *  the host fixes the settings that decide how generated code talks to the
+   *  runtime, threading, the kind of safepoint polls and C++ exceptions, and
+   *  the program's own: the link-time properties and service providers its
+   *  configuration sets, so that the extension's code and its copies of host
+   *  methods resolve them as the host's code does. The mode and debugging
+   *  settings stay the extension's: they describe how its own code is compiled.
+   */
+  private[scalanative] def extensionConfig(
+      config: Config,
+      manifest: scala.scalanative.live.Manifest
+  ): Config = {
+    val header = manifest.header
+    config.withCompilerConfig { c =>
+      val providers = header.serviceProviders.foldLeft(c.serviceProviders) {
+        case (all, entry) =>
+          val own = all.getOrElse(entry.service, Nil).toSeq
+          all.updated(entry.service, (entry.providers ++ own).distinct)
+      }
+      val withExceptions =
+        if (header.cxxExceptions)
+          c.withCppOptions(o => (o :+ "-fcxx-exceptions").distinct)
+        else c.withCppOptions(_.filterNot(_ == "-fcxx-exceptions"))
+      withExceptions
+        .withMultithreading(header.multithreading)
+        .withGarbageCollectorConfig(
+          _.withTrapBasedYieldPoints(header.yieldPointTraps)
+        )
+        .withBuildTarget(BuildTarget.application)
+        .withLinktimeProperties(
+          _ ++ header.linktimeProperties.map(p => p.name -> p.value)
+        )
+        .withServiceProviders(providers)
+    }
+  }
+
+  private def buildProgram(
       config: Config
   )(implicit scope: Scope, ec: ExecutionContext): Future[Path] = {
     val initialConfig = config

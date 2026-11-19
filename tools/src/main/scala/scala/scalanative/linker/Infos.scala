@@ -238,6 +238,10 @@ sealed trait ReachabilityAnalysis {
 }
 
 object ReachabilityAnalysis {
+  object Result {
+    private[linker] val noUnknownSubclasses: Class => Boolean = _ => false
+  }
+
   final class Failure(
       val defns: Seq[nir.Defn],
       val unreachable: Seq[Reach.UnreachableSymbol],
@@ -254,8 +258,30 @@ object ReachabilityAnalysis {
       val dynsigs: Seq[nir.Sig],
       val dynimpls: Seq[nir.Global.Member],
       val resolvedVals: mutable.Map[String, nir.Val],
-      val foundServiceProviders: FoundServiceProviders
+      val foundServiceProviders: FoundServiceProviders,
+      val phantoms: collection.Set[nir.Global.Top] = Set.empty,
+      val openScopes: Seq[ScopeInfo] = Nil,
+      unknownSubclasses: Class => Boolean = Result.noUnknownSubclasses,
+      // Extension links: the targets of calls on host classes that the host
+      // does not dispatch (`live.HostDispatch`)
+      val hostTargets: collection.Map[
+        (nir.Global.Top, nir.Sig),
+        Seq[live.Dispatch.ClassCase]
+      ] = Map.empty
   ) extends ReachabilityAnalysis {
+
+    /** Whether a class may have subclasses this link does not see: in an
+     *  extension link, host classes that are open or that the host subclasses.
+     */
+    def mayHaveUnknownSubclasses(cls: Class): Boolean = unknownSubclasses(cls)
+
+    /** Whether this is a member of a phantom subclass or implementor of an open
+     *  type (live execution), which stands for extension code that the host
+     *  link does not see.
+     */
+    def isPhantom(name: nir.Global): Boolean =
+      phantoms.nonEmpty && phantoms.contains(name.top)
+
     lazy val ObjectClass = infos(nir.Rt.Object.name).asInstanceOf[Class]
     lazy val StringClass = infos(nir.Rt.StringName).asInstanceOf[Class]
     lazy val StringValueField =

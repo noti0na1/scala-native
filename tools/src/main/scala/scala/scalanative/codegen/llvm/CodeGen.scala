@@ -32,11 +32,19 @@ object CodeGen {
     implicit def logger: build.Logger = config.logger
     implicit val platform: PlatformInfo = PlatformInfo(config)
     implicit val meta: CodeGenMetadata =
-      new CodeGenMetadata(analysis, config, proxies)
+      if (!config.compilerConfig.liveExecution.isExtension)
+        new CodeGenMetadata(analysis, config, proxies)
+      else
+        config.logger.time("Extension metadata") {
+          new CodeGenMetadata(analysis, config, proxies)
+        }
 
-    val generated = Generate(encodedMainClass(config), defns ++ proxies)
+    val generated = LiveBoundary.beforeLowering(
+      Generate(encodedMainClass(config), defns ++ proxies)
+    )
     val embedded = ResourceEmbedder(config)
     val lowered = lower(generated ++ embedded)
+      .map(LiveBoundary.afterLowering(config, _))
     lowered
       .andThen { case Success(defns) => dumpDefns(config, "lowered", defns) }
       .map(emit(config, _))
@@ -149,11 +157,24 @@ object CodeGen {
         .generateIfSupported(outputDir, config)
         .map(Future.successful)
 
-      val llvmIRGenerators =
-        if (config.compilerConfig.useIncrementalCompilation)
-          separateIncrementally()
-        else separate()
-      llvmIRGenerators ++ maybeBuildInfoGenerator
+      // A chained extension, such as a REPL line, is small, compiled once and
+      // linked by the same clang call: it gets one IR file
+      val isChainedExtension = config.compilerConfig.liveExecution match {
+        case ext: build.LiveExecution.Extension => ext.isChained
+        case _                                  => false
+      }
+      if (isChainedExtension)
+        Seq(Future {
+          Impl(env, assembly.sortBy(_.name), sourceCodeCache)
+            .gen("extension", outputDir)
+        })
+      else {
+        val llvmIRGenerators =
+          if (config.compilerConfig.useIncrementalCompilation)
+            separateIncrementally()
+          else separate()
+        llvmIRGenerators ++ maybeBuildInfoGenerator
+      }
     }
 
   private object Impl {

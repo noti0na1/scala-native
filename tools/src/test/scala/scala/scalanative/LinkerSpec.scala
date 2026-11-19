@@ -35,9 +35,10 @@ abstract class LinkerSpec {
   def link[T](
       entry: String,
       sources: Map[String, String],
-      setupConfig: NativeConfig => NativeConfig = identity
+      setupConfig: NativeConfig => NativeConfig = identity,
+      extraNir: Seq[nir.Defn] = Nil
   )(fn: (Config, ReachabilityAnalysis.Result) => T): T =
-    mayLink(entry, sources, setupConfig) {
+    mayLink(entry, sources, setupConfig, extraNir) {
       case (config, result: ReachabilityAnalysis.Result) => fn(config, result)
       case _ => fail("Expected code to link"); unreachable
     }
@@ -45,18 +46,25 @@ abstract class LinkerSpec {
   def doesNotLink[T](
       entry: String,
       sources: Map[String, String],
-      setupConfig: NativeConfig => NativeConfig = identity
+      setupConfig: NativeConfig => NativeConfig = identity,
+      extraNir: Seq[nir.Defn] = Nil
   )(fn: (Config, ReachabilityAnalysis.Failure) => T): T =
-    mayLink(entry, sources, setupConfig) {
+    mayLink(entry, sources, setupConfig, extraNir) {
       case (config, result: ReachabilityAnalysis.Failure) =>
         fn(config, result)
       case _ => fail("Expected code to not link"); unreachable
     }
 
+  /** @param extraNir
+   *    definitions written next to the compiled sources' NIR, one file per
+   *    top-level name (in the empty package), for code the compiler does not
+   *    write
+   */
   protected def mayLink[T](
       entry: String,
       sources: Map[String, String],
-      setupConfig: NativeConfig => NativeConfig = identity
+      setupConfig: NativeConfig => NativeConfig = identity,
+      extraNir: Seq[nir.Defn] = Nil
   )(fn: (Config, ReachabilityAnalysis) => T): T = {
     // Deleted once the scope has closed what it opened in the directory
     val outDir = Files.createTempDirectory("native-test-out")
@@ -65,10 +73,41 @@ abstract class LinkerSpec {
         Scope { implicit in =>
           val compiler = NIRCompiler.getCompiler(outDir)
           val files = compiler.compile(sourcesDir)
+          extraNir.groupBy(_.name.top).foreach {
+            case (top, defns) =>
+              val channel = Files.newByteChannel(
+                outDir.resolve(top.id + ".nir"),
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE,
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
+              )
+              try nir.serialization.serializeBinary(defns, channel)
+              finally channel.close()
+          }
           val config = makeConfig(outDir, entry, setupConfig)
           val entries = ScalaNative.entries(config)
-          val result = linker.Link(config, entries)
-          fn(config, result)
+          config.compilerConfig.liveExecution match {
+            case host: build.LiveExecution.Host if host.stubUnlinkable =>
+              fn(config, live.HostStubs.link(config, entries, host))
+            case host: build.LiveExecution.Host =>
+              fn(config, live.LiveLink.host(config, entries, host))
+            case ext: build.LiveExecution.Extension =>
+              // An extension of the compiled sources, unless it names its roots
+              val withRoots =
+                if (ext.roots.nonEmpty) ext else ext.copy(roots = Seq(outDir))
+              val extConfig = config
+                .withMainClass(None)
+                .withCompilerConfig(_.withLiveExecution(withRoots))
+              val extEntries = ScalaNative.entries(extConfig) ++
+                live.LiveLink.extensionEntries(extConfig, withRoots)
+              fn(
+                extConfig,
+                if (withRoots.stubUnlinkable)
+                  live.HostStubs.linkExtension(extConfig, extEntries, withRoots)
+                else linker.Link(extConfig, extEntries)
+              )
+            case _ => fn(config, linker.Link(config, entries))
+          }
         }
       }
     finally scalanative.build.IO.deleteRecursive(outDir)

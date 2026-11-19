@@ -110,7 +110,8 @@ private[scalanative] object Lower {
       defns.foreach {
         case _: nir.Defn.Class | _: nir.Defn.Module | _: nir.Defn.Trait =>
           ()
-        case nir.Defn.Declare(attrs, MethodRef(_: Class | _: Trait, _), _) if !attrs.isExtern =>
+        // An extension keeps declarations of the host's methods it calls
+        case nir.Defn.Declare(attrs, name @ MethodRef(_: Class | _: Trait, _), _) if !attrs.isExtern && !isHostMethod(name) =>
           ()
         case nir.Defn.Var(attrs, FieldRef(_: Class, _), _, _) if !attrs.isExtern =>
           ()
@@ -120,6 +121,14 @@ private[scalanative] object Lower {
 
       buf.toSeq
     }
+
+    private val liveExtension: Option[LiveMetadata.Extension] = meta.live match {
+      case ext: LiveMetadata.Extension => Some(ext)
+      case _                           => None
+    }
+
+    private def isHostMethod(name: nir.Global): Boolean =
+      liveExtension.exists(_.manifest.owns(name.top))
 
     override def onDefn(defn: nir.Defn): nir.Defn = defn match {
       case defn: nir.Defn.Define =>
@@ -1087,11 +1096,12 @@ private[scalanative] object Lower {
       }
 
     object shouldCarrierCompensateBlockingExtern {
+      // An extension's code runs on the host's threads, virtual ones too
       private val usesVirtualThreads = platform.isMultithreadingEnabled && {
-        analysis.infos.get(RuntimeVirtualThread).exists {
-          case info: ScopeInfo => info.implementors.exists(_.allocations > 0)
-          case _               => false
-        }
+        Lower.usesVirtualThreads(analysis) || (meta.live match {
+          case ext: LiveMetadata.Extension => ext.manifest.header.virtualThreads
+          case _                           => false
+        })
       }
       def apply(name: nir.Global.Member) =
         usesVirtualThreads && analysis.infos.get(name).exists { info =>
@@ -1199,7 +1209,8 @@ private[scalanative] object Lower {
 
       def genTraitVirtualLookup(trt: Trait): Unit = {
         val methodIdx = nir.Val.Int(
-          trt.methods
+          meta
+            .traitMethods(trt)
             .indexOf(sig)
             .ensuring(_ >= 0, s"Not found ${sig.show} entry in ${trt.name.id} methods")
         )
@@ -1234,24 +1245,57 @@ private[scalanative] object Lower {
         }
       }
 
-      def genMethodLookup(scope: ScopeInfo): Unit = {
-        scope.targets(sig).toSeq match {
-          case Seq() =>
-            // logger.warn(s"Unable to call ${sig.show} on instance of ${scope.name.id} in ${srcPosition.show}. It would result in NullPointerException at runtime")
+      // A receiver of a host type in an extension: dispatch as the host does
+      def genHostMethodLookup(ext: LiveMetadata.Extension, scope: ScopeInfo): Unit =
+        ext.dispatch(scope, sig) match {
+          case _root_.scala.scalanative.live.Dispatch.Direct(None) =>
             let(n, nir.Op.Copy(nir.Val.Null), unwind)
-          case Seq(impl) =>
+          case _root_.scala.scalanative.live.Dispatch.Direct(Some(impl)) =>
             let(n, nir.Op.Copy(nir.Val.Global(impl, nir.Type.Ptr)), unwind)
-          case _ =>
-            obj.ty match {
-              case ClassRef(cls) =>
-                genClassVirtualLookup(cls)
-              case TraitRef(_) if Object.calls.contains(sig) =>
-                genClassVirtualLookup(Object)
-              case TraitRef(trt) =>
-                genTraitVirtualLookup(trt)
-              case _ => util.unreachable
+          case _root_.scala.scalanative.live.Dispatch.Virtual(cls) =>
+            genClassVirtualLookup(cls)
+          case _root_.scala.scalanative.live.Dispatch.Interface(trt) =>
+            genTraitVirtualLookup(trt)
+          case _root_.scala.scalanative.live.Dispatch.ByClass(cases) =>
+            // The receiver's RTTI picks the case: no instance of another class
+            // reaches the call, so the last case needs no test
+            val typeptr = let(nir.Op.Load(nir.Type.Ptr, obj), unwind)
+            val resultL = fresh()
+            for {
+              c <- cases.init
+              name <- c.classes
+            } {
+              val nextL = fresh()
+              val classRtti = nir.Val.Global(nir.Global.Top(name).member(nir.Sig.Generated("type")), nir.Type.Ptr)
+              val is = let(nir.Op.Comp(nir.Comp.Ieq, nir.Type.Ptr, typeptr, classRtti), unwind)
+              branch(is, nir.Next.Label(resultL, Seq(nir.Val.Global(c.target, nir.Type.Ptr))), nir.Next(nextL))
+              label(nextL)
             }
+            jump(resultL, Seq(nir.Val.Global(cases.last.target, nir.Type.Ptr)))
+            label(resultL, Seq(nir.Val.Local(n, nir.Type.Ptr)))
         }
+
+      def genMethodLookup(scope: ScopeInfo): Unit = liveExtension match {
+        case Some(ext) if ext.isHostOwned(scope) => genHostMethodLookup(ext, scope)
+        case _                                   =>
+          scope.targets(sig).toSeq match {
+            case Seq() =>
+              // logger.warn(s"Unable to call ${sig.show} on instance of ${scope.name.id} in ${srcPosition.show}. It would result in NullPointerException at runtime")
+              let(n, nir.Op.Copy(nir.Val.Null), unwind)
+            // A phantom stands for extension code: the call stays virtual
+            case Seq(impl) if !analysis.isPhantom(impl) =>
+              let(n, nir.Op.Copy(nir.Val.Global(impl, nir.Type.Ptr)), unwind)
+            case _ =>
+              obj.ty match {
+                case ClassRef(cls) =>
+                  genClassVirtualLookup(cls)
+                case TraitRef(_) if Object.calls.contains(sig) =>
+                  genClassVirtualLookup(Object)
+                case TraitRef(trt) =>
+                  genTraitVirtualLookup(trt)
+                case _ => util.unreachable
+              }
+          }
       }
 
       def genStaticMethod(cls: Class): Unit = {
@@ -1384,7 +1428,7 @@ private[scalanative] object Lower {
       val obj = genVal(buf, v)
 
       ty match {
-        case ClassRef(cls) if cls.subclasses.isEmpty =>
+        case ClassRef(cls) if cls.subclasses.isEmpty && !analysis.mayHaveUnknownSubclasses(cls) =>
           val typeptr = let(nir.Op.Load(nir.Type.Ptr, obj), unwind)
           let(nir.Op.Comp(nir.Comp.Ieq, nir.Type.Ptr, typeptr, rtti(cls).const), unwind)
 
@@ -1877,7 +1921,7 @@ private[scalanative] object Lower {
       val nir.Op.Module(name) = op
 
       meta.analysis.infos(name) match {
-        case cls: Class if cls.isConstantModule =>
+        case cls: Class if meta.isConstantModule(cls) =>
           val instance = name.member(nir.Sig.Generated("instance"))
           buf.let(
             n,
@@ -2494,6 +2538,11 @@ private[scalanative] object Lower {
 
   val throwNoSuchMethodTy =
     nir.Type.Function(Seq(nir.Type.Ptr, nir.Type.Ptr), nir.Type.Nothing)
+
+  /** The type of a call of `throwNoSuchMethod` with a string before lowering: the stubs of code that does not link.
+   */
+  val throwNoSuchMethodStringTy =
+    nir.Type.Function(Seq(nir.Type.Ptr, nir.Rt.String), nir.Type.Nothing)
   val throwNoSuchMethod =
     nir.Global.Member(
       nir.Rt.Runtime.name,
@@ -2520,6 +2569,14 @@ private[scalanative] object Lower {
   )
 
   private val RuntimeVirtualThread = nir.Global.Top("scala.scalanative.runtime.VirtualThread")
+
+  /** Whether the program allocates virtual threads, so that blocking extern calls compensate their carrier thread.
+   */
+  def usesVirtualThreads(analysis: ReachabilityAnalysis.Result): Boolean =
+    analysis.infos.get(RuntimeVirtualThread).exists {
+      case info: ScopeInfo => info.implementors.exists(_.allocations > 0)
+      case _               => false
+    }
   private val RuntimeBlockerModule = nir.Global.Top("scala.scalanative.runtime.Blocker$")
   private val RuntimeBlockerBeginSigUnmangled = nir.Sig.Method("begin", Seq(nir.Type.Bool), nir.Sig.Scope.Public)
   private val RuntimeBlockerEndSigUnmangled = nir.Sig.Method("end", Seq(nir.Type.Bool, nir.Type.Unit), nir.Sig.Scope.Public)
