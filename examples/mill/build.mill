@@ -1,0 +1,35 @@
+//| mill-version: 1.3.1
+//| mvnDeps: ["org.scala-native::mill-scala-native-snc::0.5.13-SNAPSHOT"]
+package build
+
+import mill.*
+import mill.scalalib.*
+import mill.scalanativelib.snc.SncModule
+
+// A library, an application that uses it and os-lib, and their MUnit tests,
+// all compiled by snc: the one that $SNC names, else snc on the PATH. Macros
+// (os-lib's paths, MUnit's test locations) need snc-host.
+
+trait ExampleModule extends SncModule {
+  // The Scala version that `snc --about` reports
+  def scalaVersion = "3.11.0-RC1-bin-20261119-90f3daf-NIGHTLY"
+  def scalaNativeVersion = "0.5.13-SNAPSHOT"
+  override def repositories = Task {
+    super.repositories() :+
+      "https://repo.scala-lang.org/artifactory/maven-nightlies"
+  }
+
+  trait ExampleTests extends SncTests with TestModule.Munit {
+    def munitVersion = "1.2.1"
+  }
+}
+
+object lib extends ExampleModule {
+  object test extends ExampleTests
+}
+
+object app extends ExampleModule {
+  override def moduleDeps = Seq(lib)
+  override def mvnDeps = Seq(mvn"com.lihaoyi::os-lib::0.11.8")
+  object test extends ExampleTests
+}
