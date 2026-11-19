@@ -58,6 +58,24 @@ object ScalaNativePlugin extends AutoPlugin {
     val nativeLink =
       taskKey[NativeLinkResult]("Generates native binary without running it.")
 
+    /** The `snc` executable, a Scala 3 compiler built with Scala Native that
+     *  writes TASTy and NIR. When defined, `compile` runs it instead of the JVM
+     *  Scala compiler, against the Java API of the JDK that sbt runs on, as
+     *  `scalac` does. Compilation is incremental when `snc` streams Zinc's
+     *  analysis (`snc --about` reports `"analysis": true`); otherwise any
+     *  change of a source or of the class path recompiles every source of the
+     *  configuration. A bare name such as `file("snc")` is looked up on the
+     *  `PATH`. `None`, the default, keeps the JVM compiler.
+     */
+    val nativeScalaCompiler = settingKey[Option[File]](
+      "The snc executable; when defined, compile runs it instead of the JVM Scala compiler."
+    )
+
+    /** Options that `compile` passes to `snc`, after `scalacOptions`. */
+    val nativeScalaCompilerOptions = taskKey[Seq[String]](
+      "Options that compile passes to snc, after scalacOptions."
+    )
+
     val nativeLinkReleaseFast =
       taskKey[NativeLinkResult](
         "Generates native binary in release-fast configuration without running it."

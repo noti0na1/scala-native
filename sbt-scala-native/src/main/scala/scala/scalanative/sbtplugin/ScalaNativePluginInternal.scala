@@ -26,6 +26,7 @@ import scala.scalanative.sbtplugin.ScalaNativePlugin.autoImport.{
   ScalaNativeCrossVersion => _, _
 }
 import scala.scalanative.sbtplugin.Utilities._
+import scala.scalanative.sbtplugin.snc.{SncCommand, SncCompiler}
 import scala.scalanative.testinterface.TargetRunner
 import scala.scalanative.testinterface.adapter.TestAdapter
 import scala.scalanative.util.Scope
@@ -134,6 +135,8 @@ object ScalaNativePluginInternal {
         .withOptimize(Discover.optimize())
     },
     ThisBuild / nativeConfig := (Global / nativeConfig).value,
+    nativeScalaCompiler := None,
+    nativeScalaCompilerOptions := Def.uncached(Seq.empty[String]),
     nativeWarnOldJVM := {
       val logger = streams.value.log
       checkJVMVersion(logger)
@@ -234,6 +237,75 @@ object ScalaNativePluginInternal {
       }
       .tag(NativeTags.Link)
 
+  /** Compiles with `snc` when `nativeScalaCompiler` is defined. An `snc` that
+   *  streams Zinc's analysis (`snc --about` says `"analysis": true`) compiles
+   *  incrementally. One that does not reports no dependencies, so Zinc
+   *  recompiles everything when a source changes (`recompileAllFraction` 0) or
+   *  when the class path's contents change (their digest is part of Zinc's
+   *  setup).
+   */
+  private lazy val nativeScalaCompilerSettings: Seq[Setting[_]] = Seq(
+    compile / compilers := Def.uncached {
+      val default = (compile / compilers).value
+      val options = nativeScalaCompilerOptions.value
+      val workingDirectory = (ThisBuild / baseDirectory).value
+      nativeScalaCompiler.value.map(SncCompiler.onPath).fold(default) { snc =>
+        if (!snc.isFile)
+          throw new MessageOnlyException(
+            s"nativeScalaCompiler: $snc is not a file"
+          )
+        SncCompiler.compilers(
+          snc,
+          sncJavaHome(options) ++ options,
+          default,
+          workingDirectory
+        )
+      }
+    },
+    incOptions := Def.uncached {
+      val options = incOptions.value
+      nativeScalaCompiler.value.map(SncCompiler.onPath) match {
+        case Some(snc) if !SncCompiler.reportsAnalysis(snc) =>
+          options.withRecompileAllFraction(0.0)
+        case _ => options
+      }
+    },
+    extraIncOptions := Def.uncached {
+      implicit val conv: FileConverter = Keys.fileConverter.value
+      val options = extraIncOptions.value
+      val sncOptions = nativeScalaCompilerOptions.value
+      val classpath = PluginCompat.toNioPaths(dependencyClasspath.value)
+      nativeScalaCompiler.value.map(SncCompiler.onPath).fold(options) { snc =>
+        val classpathDigest =
+          if (SncCompiler.reportsAnalysis(snc)) Nil
+          else
+            Seq(
+              "scalanative.snc.classpath" ->
+                SncCompiler.classpathDigest(classpath)
+            )
+        options ++ Seq(
+          "scalanative.snc" -> SncCompiler.identity(snc),
+          "scalanative.snc.options" ->
+            (sncJavaHome(sncOptions) ++ sncOptions).mkString(" ")
+        ) ++ classpathDigest
+      }
+    },
+    classpathEntryDefinesClassVF := Def.uncached {
+      val default = classpathEntryDefinesClassVF.value
+      val conv = Keys.fileConverter.value
+      if (nativeScalaCompiler.value.isEmpty) default
+      else SncCompiler.definesClass(default, conv.toPath(_))
+    }
+  )
+
+  /** `snc`'s `--java-home` for the JDK sbt runs on, whose Java API `scalac`
+   *  compiles against too, unless `options` name a JDK.
+   */
+  private def sncJavaHome(options: Seq[String]): Seq[String] =
+    if (options.exists(o => o == "--java-home" || o.startsWith("--java-home=")))
+      Nil
+    else SncCommand.javaHome(new File(sys.props("java.home")).toPath)
+
   /** Config settings are called for each project, for each Scala version, and
    *  for test and app configurations. The total with 3 Scala versions equals 6
    *  times per project.
@@ -333,7 +405,7 @@ object ScalaNativePluginInternal {
         "`runMain` is not supported in Scala Native"
       )
     }
-  )
+  ) ++ nativeScalaCompilerSettings
 
   lazy val scalaNativeCompileSettings: Seq[Setting[_]] = {
     scalaNativeConfigSettings(false)
