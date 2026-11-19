@@ -31,7 +31,7 @@ final case class Manifest(
   /** For a manifest read from a file: the hash the file has, which `read`
    *  verified, so that it is not encoded and hashed again.
    */
-  @transient private var readHash: Option[String] = None
+  @transient private[live] var readHash: Option[String] = None
 
   /** For a manifest that is another one plus extra entries (a chain of
    *  extensions, `ManifestChain`): that one, whose lookups are extended instead
