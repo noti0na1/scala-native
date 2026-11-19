@@ -6,6 +6,7 @@ import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.channels._
 import java.nio.file._
+import java.util.zip.{ZipEntry, ZipFile}
 
 import scalanative.util.{Scope, acquire, defer}
 
@@ -62,7 +63,11 @@ object VirtualDirectory {
     assert(Files.exists(file), s"Jar doesn't exist: $absolute")
     assert(absolute.toString.endsWith(".jar"), s"Not a jar: $absolute")
 
-    new JarDirectory(file)
+    try new JarDirectory(file)
+    catch {
+      // Scala Native has no zip file system provider; read the jar directly
+      case _: ProviderNotFoundException => new ZipDirectory(file)
+    }
   }
 
   /** Virtual directory based on either local directory or a jar. */
@@ -192,6 +197,73 @@ object VirtualDirectory {
           }.filter(Files.isRegularFile(_))
         }
     }
+  }
+
+  /** Read-only jar contents read through java.util.zip, for platforms without a
+   *  zip file system provider. Paths are absolute, as in a jar file system.
+   */
+  private final class ZipDirectory(override val path: Path)(implicit
+      in: Scope
+  ) extends VirtualDirectory {
+    def uri: URI = URI.create(s"jar:${path.toUri}")
+    private val zipFile: ZipFile = acquire(new ZipFile(path.toFile()))
+
+    private def entry(path: Path): ZipEntry = {
+      val name = path.toString.replace('\\', '/').stripPrefix("/")
+      val entry = zipFile.getEntry(name)
+      if (entry == null) throw new NoSuchFileException(s"${this.path}!/$name")
+      entry
+    }
+
+    override def read(path: Path): ByteBuffer = {
+      val stream = zipFile.getInputStream(entry(path))
+      try ByteBuffer.wrap(readFully(stream, Int.MaxValue))
+      finally stream.close()
+    }
+
+    override def read(path: Path, len: Int): ByteBuffer = {
+      val stream = zipFile.getInputStream(entry(path))
+      try ByteBuffer.wrap(readFully(stream, len))
+      finally stream.close()
+    }
+
+    private def readFully(stream: java.io.InputStream, len: Int) = {
+      val out = new java.io.ByteArrayOutputStream()
+      val buf = new Array[Byte](8192)
+      var remaining = len
+      var eof = false
+      while (!eof && remaining > 0) {
+        val n = stream.read(buf, 0, math.min(buf.length, remaining))
+        if (n == -1) eof = true
+        else {
+          out.write(buf, 0, n)
+          remaining -= n
+        }
+      }
+      out.toByteArray()
+    }
+
+    override def files: Seq[Path] = {
+      val buf = Seq.newBuilder[Path]
+      val entries = zipFile.entries()
+      while (entries.hasMoreElements()) {
+        val e = entries.nextElement()
+        if (!e.isDirectory()) buf += Paths.get("/" + e.getName())
+      }
+      buf.result()
+    }
+
+    override def pathMatcher(pattern: String): PathMatcher =
+      FileSystems.getDefault().getPathMatcher(pattern)
+
+    override def write(path: Path, buffer: ByteBuffer): Unit =
+      throw new UnsupportedOperationException("Can't write to a jar.")
+
+    override def write(path: Path)(fn: Writer => Unit): Path =
+      throw new UnsupportedOperationException("Can't write to a jar.")
+
+    override def merge(sources: Seq[Path], target: Path): Path =
+      throw new UnsupportedOperationException("Can't merge in a jar.")
   }
 
   private object EmptyDirectory extends VirtualDirectory {

@@ -5,11 +5,10 @@ import java.io.IOException
 import java.nio.file.attribute.{BasicFileAttributes, DosFileAttributes}
 import java.nio.file.{
   AccessDeniedException, FileSystems, FileVisitOption, FileVisitResult, Files,
-  Path, Paths, SimpleFileVisitor, StandardCopyOption
+  Path, Paths, ProviderNotFoundException, SimpleFileVisitor, StandardCopyOption
 }
-import java.security.{DigestInputStream, MessageDigest}
 import java.util.EnumSet
-import java.util.zip.{ZipEntry, ZipInputStream}
+import java.util.zip.{ZipEntry, ZipFile, ZipInputStream}
 
 import scala.util.control.NonFatal
 
@@ -193,30 +192,23 @@ private[scalanative] object IO {
   }
 
   /** Compute a SHA-1 hash of `path`. */
-  def sha1(path: Path, bufSize: Int = 1024): Array[Byte] = {
-    val digest = MessageDigest.getInstance("SHA-1")
-    val stream = Files.newInputStream(path)
-    val digestStream = new DigestInputStream(stream, digest)
-    try {
-      val buf = new Array[Byte](bufSize)
-      while (digestStream.read(buf, 0, bufSize) != -1) {}
-      digest.digest()
-    } finally {
-      digestStream.close()
-    }
-  }
+  def sha1(path: Path, bufSize: Int = 1024): Array[Byte] =
+    sha1files(Seq(path), bufSize)
 
   /** Compute a SHA-1 hash of `files`. */
   def sha1files(files: Seq[Path], bufSize: Int = 1024): Array[Byte] = {
-    val digest = MessageDigest.getInstance("SHA-1")
+    val digest = new Sha1()
+    val buf = new Array[Byte](bufSize)
     files.foreach { file =>
       val stream = Files.newInputStream(file)
-      val digestStream = new DigestInputStream(stream, digest)
-      val buf = new Array[Byte](bufSize)
       try {
-        while (digestStream.read(buf, 0, bufSize) != -1) {}
+        var n = stream.read(buf, 0, bufSize)
+        while (n != -1) {
+          digest.update(buf, 0, n)
+          n = stream.read(buf, 0, bufSize)
+        }
       } finally {
-        digestStream.close()
+        stream.close()
       }
     }
     digest.digest()
@@ -225,7 +217,13 @@ private[scalanative] object IO {
   /** Unzip all members of the ZIP archive `archive` to `target`. */
   def unzip(archive: Path, target: Path): Unit = {
     Files.createDirectories(target)
-    val zipFS = FileSystems.newFileSystem(archive, null: ClassLoader)
+    val zipFS =
+      try FileSystems.newFileSystem(archive, null: ClassLoader)
+      catch {
+        // Scala Native has no zip file system provider
+        case _: ProviderNotFoundException =>
+          return unzipEntries(archive, target)
+      }
     try {
       val rootDirectories = zipFS.getRootDirectories().iterator
       while (rootDirectories.hasNext) {
@@ -233,6 +231,27 @@ private[scalanative] object IO {
         copyRecursive(root, target)
       }
     } finally zipFS.close()
+  }
+
+  private def unzipEntries(archive: Path, target: Path): Unit = {
+    val zipFile = new ZipFile(archive.toFile())
+    try {
+      val root = target.toAbsolutePath().normalize()
+      val entries = zipFile.entries()
+      while (entries.hasMoreElements()) {
+        val entry = entries.nextElement()
+        val dest = root.resolve(entry.getName()).normalize()
+        if (!dest.startsWith(root))
+          throw new IOException(s"Zip entry outside target: ${entry.getName()}")
+        if (entry.isDirectory()) Files.createDirectories(dest)
+        else {
+          Files.createDirectories(dest.getParent())
+          val in = zipFile.getInputStream(entry)
+          try Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING)
+          finally in.close()
+        }
+      }
+    } finally zipFile.close()
   }
 
   /** Copy source directory and contents to target directory. */

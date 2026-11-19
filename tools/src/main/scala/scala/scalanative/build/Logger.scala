@@ -1,7 +1,6 @@
 package scala.scalanative.build
 
 import java.lang.System.{err, lineSeparator => nl, out}
-import java.util.Locale
 
 import scala.concurrent._
 import scala.sys.process.ProcessLogger
@@ -120,7 +119,7 @@ object Logger {
     ProcessLogger(
       logger.info,
       line => {
-        val lower = line.toLowerCase(Locale.ROOT)
+        val lower = line.map(Character.toLowerCase)
         val summary = line.endsWith(" generated.")
         def hasSeverity(level: String): Boolean =
           lower.startsWith(s"$level:") ||

@@ -333,18 +333,16 @@ private[scalanative] object NativeLib {
       IO.unzip(source, target)
     }
 
-    if (Platform.isJVM) {
-      val jarhash = IO.sha1(source)
-      val jarhashPath = target.resolve("jarhash")
-      def unpacked =
-        Files.exists(target) &&
-          Files.exists(jarhashPath) &&
-          Arrays.equals(jarhash, Files.readAllBytes(jarhashPath))
-      if (!unpacked) {
-        unpack()
-        IO.write(jarhashPath, jarhash)
-      }
-    } else unpack()
+    val jarhash = IO.sha1(source)
+    val jarhashPath = target.resolve("jarhash")
+    def unpacked =
+      Files.exists(target) &&
+        Files.exists(jarhashPath) &&
+        Arrays.equals(jarhash, Files.readAllBytes(jarhashPath))
+    if (!unpacked) {
+      unpack()
+      IO.write(jarhashPath, jarhash)
+    }
     target
   }
 
@@ -365,19 +363,17 @@ private[scalanative] object NativeLib {
       IO.deleteRecursive(target)
       IO.copyDirectory(source, target)
     }
-    if (Platform.isJVM) {
-      val files = IO.getAll(source, allFilesPattern(source))
-      val fileshash = IO.sha1files(files)
-      val fileshashPath = target.resolve("fileshash")
-      def copied =
-        Files.exists(target) &&
-          Files.exists(fileshashPath) &&
-          Arrays.equals(fileshash, Files.readAllBytes(fileshashPath))
-      if (!copied) {
-        copy()
-        IO.write(fileshashPath, fileshash)
-      }
-    } else copy()
+    val files = IO.getAll(source, allFilesPattern(source))
+    val fileshash = IO.sha1files(files)
+    val fileshashPath = target.resolve("fileshash")
+    def copied =
+      Files.exists(target) &&
+        Files.exists(fileshashPath) &&
+        Arrays.equals(fileshash, Files.readAllBytes(fileshashPath))
+    if (!copied) {
+      copy()
+      IO.write(fileshashPath, fileshash)
+    }
     target
   }
 

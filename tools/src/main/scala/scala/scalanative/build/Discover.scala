@@ -6,7 +6,6 @@ import java.nio.file.{Files, LinkOption, Path, Paths}
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.reflect.ClassTag
-import scala.sys.process._
 import scala.util.Try
 
 import scala.scalanative.build.IO.RichPath
@@ -92,7 +91,7 @@ object Discover {
   /** Find default options passed to the system's native linker. */
   def linkingOptions(): Seq[String] = {
     val llvmLibDirs =
-      Try(Process(s"$llvmConfigCLI --libdir").lineStream_!.toSeq)
+      Try(Processes.lines(Seq(llvmConfigCLI, "--libdir")))
         .getOrElse(Seq.empty)
 
     val libDirs =
@@ -133,9 +132,7 @@ object Discover {
   private def clangInfo(clang: Path): ClangInfo = {
     val versionCommand = Seq(clang.abs, "--version")
     val cmdString = versionCommand.mkString(" ")
-    val processLines = Process(versionCommand)
-      .lineStream_!(silentLogger())
-      .toList
+    val processLines = Processes.lines(versionCommand)
 
     val (versionString, targetString) = processLines match {
       case version :: target :: _ => (version, target)
@@ -264,8 +261,8 @@ object Discover {
       }
     }
 
-    val path = Process(command)
-      .lineStream_!(silentLogger())
+    val path = Processes
+      .lines(command)
       .map { p => Paths.get(p) }
       .headOption
       .getOrElse {
@@ -298,9 +295,6 @@ object Discover {
   def targetTriple(implicit config: NativeConfig) = cache("target-triple") {
     _ => clangInfo.targetTriple
   }
-
-  private def silentLogger(): ProcessLogger =
-    ProcessLogger(_ => (), _ => ())
 
   private def getenv(key: String): Option[String] =
     Option(System.getenv.get(key))

@@ -1,7 +1,7 @@
 package scala.scalanative
 package codegen
 
-import java.io.{ByteArrayOutputStream, File, ObjectOutputStream, PrintWriter}
+import java.io.{ByteArrayOutputStream, File, PrintWriter}
 import java.nio.ByteBuffer
 import java.nio.file.{Files, Path, Paths}
 

@@ -72,17 +72,17 @@ private[codegen] abstract class AbstractCodeGen(
     val headers = Paths.get(s"$id.ll")
     val metadata = Paths.get(s"$id-metadata.ll")
 
-    dir.write(metadata) { metadataWriter =>
+    IRWriter.write(dir, metadata) { metadataWriter =>
       implicit val metadata: MetadataCodeGen.Context =
         new MetadataCodeGen.Context(this, new FileShowBuilder(metadataWriter))
       genPlatformMetadata()
 
-      dir.write(body) { writer =>
+      IRWriter.write(dir, body) { writer =>
         implicit val fsb: ShowBuilder = new FileShowBuilder(writer)
         genDefns(defns)
       }
 
-      dir.write(headers) { writer =>
+      IRWriter.write(dir, headers) { writer =>
         implicit val sb: ShowBuilder = new FileShowBuilder(writer)
         genPrelude()
         genConsts()

@@ -119,8 +119,11 @@ private[scalanative] object LLVM {
 
     // compile
     config.logger.running(compilec)
-    val result = Process(compilec, workDir.toFile) !
+    val result = Processes.run(
+      compilec,
+      workDir.toFile,
       Logger.toCompilerProcessLogger(config.logger)
+    )
     if (result != 0) {
       throw new BuildException(s"Failed to compile ${inpath}")
     }

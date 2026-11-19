@@ -45,7 +45,7 @@ object Build {
       testingCompiler,
       junitAsyncNative, junitAsyncJVM,
       junitTestOutputsJVM, junitTestOutputsNative,
-      tests, testsJVM, testsExt, testsExtJVM, sandbox,
+      tests, testsJVM, testsExt, testsExtJVM, sandbox, snlink, snlinkJVM,
       scalaPartest, scalaPartestRuntime,
       scalaPartestTests, scalaPartestJunitTests,
       toolsBenchmarks
@@ -914,6 +914,29 @@ object Build {
       .withNativeCompilerPlugin
       .withScalaStandardLibrary
       .dependsOn(javalib, testInterface % "test", junitRuntime % "test")
+
+  // Command-line linker: the toolchain (`tools`) linked as a native program.
+  lazy val snlink =
+    MultiScalaProject("snlink")
+      .settings(
+        noPublishSettings,
+        // Multiple check warnings due to usage of self-types in tools
+        nativeConfig ~= { _.withCheckFatalWarnings(false) }
+      )
+      .withNativeCompilerPlugin
+      .withJUnitPlugin
+      .withScalaStandardLibrary
+      .dependsOn(tools, javalib)
+      .dependsOn(testInterface % "test", junitRuntime % "test")
+
+  // The same command-line linker on the JVM, as a baseline for snlink.
+  lazy val snlinkJVM =
+    MultiScalaProject("snlink", platform = MultiScalaProject.JVM)
+      .settings(
+        noPublishSettings,
+        libraryDependencies ++= Deps.JUnitJvm
+      )
+      .dependsOn(toolsJVM)
 
 // Testing infrastructure ------------------------------------------------
   lazy val testingCompilerInterface =
