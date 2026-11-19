@@ -106,13 +106,16 @@ class NirCodeGen(val settings: GenNIR.Settings)(using ctx: Context)
     collectTypeDefs(cunit.tpdTree)
       .foreach(genClass)
 
+    // Group by top-level name, not by output file: two files for the same
+    // path need not be equal (in Scala 3.10.1-RC1 and RC2, PlainFile compared
+    // paths by reference without interning them)
     generatedDefns.toSeq
-      .groupBy(defn => getFileFor(defn.name.top))
-      .foreach(genIRFile(_, _))
+      .groupBy(_.name.top)
+      .foreach((owner, defns) => genIRFile(getFileFor(owner), defns))
 
     reflectiveInstantiationBuffers
-      .groupMapReduce(buf => getFileFor(buf.name.top))(_.toSeq)(_ ++ _)
-      .foreach(genIRFile(_, _))
+      .groupMapReduce(_.name.top)(_.toSeq)(_ ++ _)
+      .foreach((owner, defns) => genIRFile(getFileFor(owner), defns))
 
     if (generatedMirrorClasses.nonEmpty) {
       // Ported from Scala.js
