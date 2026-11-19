@@ -33,17 +33,27 @@ object ScalaVersions {
     crossScalaVersions("3.7", 0 to 4),
     crossScalaVersions("3.8", 0 to 4),
     crossScalaVersions("3.9", 0 to 0), // LTS
-    crossScalaVersions("3.10", 0 to 0) // RC
+    crossScalaVersions("3.10", 0 to 0), // RC
+    List(sncReferenceVersion, sncScalaVersion)
   ).flatten.distinct
 
   // Tested in scheduled nightly CI to check compiler plugins
   // List maintains only upcoming releases, removed from the list after reaching stable status
   lazy val scala3RCVersions = List("3.10.1-RC1")
 
+  // The Scala 3 versions that the native Scala 3 compiler, snc, is built with:
+  // the reference compiler that compiles it (Scala 3 `main`'s), and the
+  // nightly of Scala 3 `main` that it is. The nightly comes from
+  // https://repo.scala-lang.org/artifactory/maven-nightlies.
+  final val sncReferenceVersion = "3.10.2-RC1"
+  final val sncScalaVersion = "3.11.0-RC1-bin-20261119-90f3daf-NIGHTLY"
+  def isSncVersion(version: String): Boolean =
+    version == sncReferenceVersion || version == sncScalaVersion
+
   // Scala versions used for publishing libraries
   val scala212: String = crossScala212.last
   val scala213: String = crossScala213.last
-  val scala3: String = crossScala3.last
+  val scala3: String = crossScala3.filterNot(isSncVersion).last
 
   // The latest version of minimal Scala 3 minor version used to publish artifacts
   val scala3PublishVersion = "3.1.3"

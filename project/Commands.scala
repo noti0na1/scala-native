@@ -255,13 +255,29 @@ object Commands {
   lazy val publishLocalDev = {
     projectFullVersionCommand("publish-local-dev") {
       case (version, state) =>
+        // The sbt 2.x plugin is built with an older Scala 3 than `version` may
+        // be, and cannot read the newer TASTy of its dependencies: skip it.
+        val skipSbt2Plugin = (
+          CrossVersion.partialVersion(version),
+          CrossVersion.partialVersion(ScalaVersions.sbt2ScalaVersion)
+        ) match {
+          case (Some((3, minor)), Some((3, sbtMinor))) => minor > sbtMinor
+          case _                                       => false
+        }
+        val publishVersion =
+          if (!skipSbt2Plugin) List(s"++$version publishLocal")
+          else
+            List(
+              s"++$version",
+              s"""set LocalProject("${sbtScalaNative.v3.id}") / publishLocal := {}""",
+              "publishLocal",
+              "session clear-all"
+            )
         List(
           // Sbt plugin and its dependencies
-          ScalaVersions.scala212,
-          // Artifact for current version
-          version
-        ).distinct
-          .map(v => s"++$v publishLocal") ::: state
+          s"++${ScalaVersions.scala212} publishLocal"
+        ).filterNot(_ => version == ScalaVersions.scala212) :::
+          publishVersion ::: state
     }
   }
 

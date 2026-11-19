@@ -125,8 +125,10 @@ object Settings {
         case (2, _) =>
           Seq("-Xfatal-warnings", "-encoding", "utf8", "-Xsource:3")
         case _ =>
-          Seq(
-            "-Werror",
+          // The compilers that snc is built with warn about code that the
+          // tested versions accept: their warnings are not fatal
+          (if (ScalaVersions.isSncVersion(scalaVersion.value)) Nil
+           else Seq("-Werror")) ++ Seq(
             "-encoding:utf8",
             // Tests intentionally use expressions like `-1.toUByte`
             "-Wconf:msg=Illegal literal:s",
@@ -140,6 +142,8 @@ object Settings {
     mimaSettings,
     docsSettings,
     scalacOptions ++= ignoredScalaDeprecations(scalaVersion.value),
+    // For ScalaVersions.sncScalaVersion, a Scala 3 nightly
+    resolvers += Resolver.scalaNightlyRepository,
     publishLocal := publishLocal.tag(Tags.Publish).value
   )
 
@@ -196,6 +200,10 @@ object Settings {
     Def.settings(
       autoAPIMappings := true,
       exportJars := true, // required so ScalaDoc linking works
+      // Scaladoc of the compilers that snc is built with crashes on some
+      // modules (tools); snc's build needs no API docs
+      Compile / packageDoc / publishArtifact :=
+        !ScalaVersions.isSncVersion(scalaVersion.value),
       // Don't fail on Scaladoc warnings (e.g., unresolved links to Java classes)
       Compile / doc / scalacOptions --= Seq("-Werror", "-Xfatal-warnings"),
       Compile / doc / scalacOptions --= scalaVersionsDependendent(
