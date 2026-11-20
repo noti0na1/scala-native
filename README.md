@@ -5,7 +5,7 @@ This is a fork of [Scala Native](https://github.com/scala-native/scala-native) (
 - **`snlink`**, the Scala Native toolchain as a native command-line linker: it links Scala Native programs and libraries without a JVM.
 - **Compiling with `snc` in sbt and Mill**: the sbt plugin's `nativeScalaCompiler`, and the Mill plugin's `SncModule`, compile with `snc` instead of the JVM Scala compiler, incrementally: Zinc recompiles what it would for `scalac`. [examples/](examples) has a project for each.
 - **Live execution**: a program linked as a *host* can load code linked later against it, as an *extension* that shares its runtime, objects and classes. `snc-host` uses it to expand macros: it links a library's macro code against itself, compiles it with clang and loads it.
-- **nscplugin for Scala 3.10.2 and later**: definitions grouped by owner (classes lost methods with newer compilers), and catch cases of union types (`case e: (A | B)`), which caught every subclass of the alternatives' common superclass.
+- **nscplugin fixes**: catch cases of union types (`case e: (A | B)`), which with Scala 3.10.2 and later caught every subclass of the alternatives' common superclass; no `java.util.Locale`, which javalib lacks, so that the plugin can be built into `snc`; and definitions grouped by top-level name rather than by output file, without which classes lost their methods with the Scala 3.10.1 release candidates (their `PlainFile`s for the same file were not equal).
 - **A build for the Scala versions `snc` is built with**: the reference compiler 3.10.2-RC1 and the Scala 3 nightly `3.11.0-RC1-bin-20261119-90f3daf-NIGHTLY`.
 
 Everything else, javalib included, is upstream's.
