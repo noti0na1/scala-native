@@ -221,4 +221,13 @@ int scalanative_ext_class_count(void *ext) {
     return ((Extension *)ext)->descriptor->classCount;
 }
 
+// Interrupts: extension code linked with an interrupt handler polls this flag
+// at method entries and loop back-edges, and calls the handler while it is
+// set (codegen/LiveInterrupts.scala)
+volatile int32_t scalanative_ext_interrupt_flag = 0;
+
+void scalanative_ext_set_interrupt(int32_t value) {
+    __atomic_store_n(&scalanative_ext_interrupt_flag, value, __ATOMIC_SEQ_CST);
+}
+
 #endif

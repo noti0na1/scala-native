@@ -429,6 +429,7 @@ object Main {
       // Chained extensions and hosts whose boundary is everything (the REPL)
       chain: Vector[Path] = Vector.empty,
       delta: Option[Path] = None,
+      interruptHandler: Option[String] = None,
       stubUnlinkable: Boolean = false
   ) {
     def host: LiveExecution =
@@ -467,7 +468,11 @@ object Main {
          |  --chain <delta>               extension: link against an earlier extension's
          |                                delta too (repeatable, in load order)
          |  --delta <path>                extension: write this extension's delta, so
-         |                                that later extensions can link against it""".stripMargin
+         |                                that later extensions can link against it
+         |  --interrupt-handler <module>.<method>
+         |                                extension: poll the host's interrupt flag at
+         |                                method entries and loop back-edges, calling
+         |                                this host method while it is set""".stripMargin
 
     object Parse {
       def unapply(
@@ -493,6 +498,8 @@ object Main {
           Some((o => o.copy(chain = o.chain :+ abs(d)), rest))
         case "--delta" :: d :: rest =>
           Some((o => o.copy(delta = Some(abs(d))), rest))
+        case "--interrupt-handler" :: h :: rest =>
+          Some((o => o.copy(interruptHandler = Some(h)), rest))
         case _ => None
       }
     }
@@ -552,6 +559,7 @@ object Main {
           hostBinary = live.hostBinary,
           chain = live.chain,
           delta = live.delta,
+          interruptHandler = live.interruptHandler,
           stubUnlinkable = live.stubUnlinkable
         )
       )

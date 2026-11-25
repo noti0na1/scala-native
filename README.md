@@ -47,11 +47,11 @@ snlink --extension --host host/out.snm --ext ext-classes/ --module ext \
   --base-dir ext host-classes/ <libraries>...
 ```
 
-The host loads the bundle with `scala.scalanative.runtime.Extension`. An extension may define classes that extend the host's open types and call what the host keeps callable; calls on open types stay virtual in the host. `--delta` and `--chain` link extensions against earlier ones, and `--stub-unlinkable` turns code that does not link (a JDK class javalib lacks, another platform's bindings) into stubs that throw `NoSuchMethodException` naming what is missing. Inside a program, `scala.scalanative.live.ExtensionLinker` links an extension on the calling thread without starting `snlink`. `scripts/live-execution/run.sh` and `chain.sh` link and run an example host with its extensions.
+The host loads the bundle with `scala.scalanative.runtime.Extension`. An extension may define classes that extend the host's open types and call what the host keeps callable; calls on open types stay virtual in the host. `--delta` and `--chain` link extensions against earlier ones, and `--stub-unlinkable` turns code that does not link (a JDK class javalib lacks, another platform's bindings) into stubs that throw `NoSuchMethodException` naming what is missing. `--interrupt-handler <module>.<method>` makes the extension's code poll the host's interrupt flag (`scalanative_ext_set_interrupt` in the loader) at method entries and loop back-edges and call that host method while it is set, so that a host can stop a busy loop in loaded code. Inside a program, `scala.scalanative.live.ExtensionLinker` links an extension on the calling thread without starting `snlink`. `scripts/live-execution/run.sh` and `chain.sh` link and run an example host with its extensions.
 
 ## snc, the native Scala 3 compiler
 
-`snc` is built in the companion Scala 3 fork, from the artifacts above; its README describes it. It compiles Scala 3 to TASTy and NIR natively, against the Java API of an installed JDK, and `snc-host`, the same compiler linked as a live-execution host, expands macros.
+`snc` is built in the companion Scala 3 fork, from the artifacts above; its README describes it. It compiles Scala 3 to TASTy and NIR natively, against the Java API of an installed JDK, and `snc-host`, the same compiler linked as a live-execution host, expands macros and runs `snc repl`, whose evaluator is a host that `snlink` links and whose lines are chained extensions.
 
 ## Compiling with snc in sbt
 

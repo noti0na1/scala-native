@@ -64,6 +64,10 @@ object LiveExecution {
    *  @param delta
    *    where to write this extension's delta, so that later extensions can link
    *    against it; its own classes and traits are then open
+   *  @param interruptHandler
+   *    a host method, `<module>.<method>` taking no arguments, that the
+   *    extension's code calls at method entries and loop back-edges while the
+   *    host's interrupt flag is set (`codegen.LiveInterrupts`)
    *  @param stubUnlinkable
    *    methods whose code refers to symbols that do not link become stubs that
    *    throw, instead of the link failing (see `live.HostStubs.linkExtension`)
@@ -74,6 +78,7 @@ object LiveExecution {
       hostBinary: Option[Path] = None,
       chain: Seq[Path] = Nil,
       delta: Option[Path] = None,
+      interruptHandler: Option[String] = None,
       stubUnlinkable: Boolean = false
   ) extends LiveExecution {
 

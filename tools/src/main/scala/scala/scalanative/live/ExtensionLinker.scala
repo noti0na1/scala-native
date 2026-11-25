@@ -84,6 +84,7 @@ final class ExtensionLinker(val toolchain: ExtensionLinker.Toolchain) {
           hostBinary = Some(request.host.binary),
           chain = request.chain,
           delta = request.delta,
+          interruptHandler = request.interruptHandler,
           stubUnlinkable = request.stubUnlinkable
         )
       )
@@ -242,6 +243,8 @@ object ExtensionLinker {
    *    deltas of the extensions it links against (REPL lines)
    *  @param delta
    *    where to write its own delta, so that later extensions link against it
+   *  @param interruptHandler
+   *    a host method its code calls while the host's interrupt flag is set
    *  @param stubUnlinkable
    *    whether methods whose code does not link become stubs that throw
    *    (`live.HostStubs.linkExtension`), instead of the link failing
@@ -256,6 +259,7 @@ object ExtensionLinker {
       optimize: Boolean = true,
       chain: Seq[Path] = Nil,
       delta: Option[Path] = None,
+      interruptHandler: Option[String] = None,
       compileOptions: Seq[String] = Nil,
       logger: Logger = Logger.default,
       stubUnlinkable: Boolean = false
@@ -264,9 +268,10 @@ object ExtensionLinker {
   object Request {
 
     /** A request from `snlink --extension` arguments: `--host`,
-     *  `--host-binary`, `--ext`, `--chain`, `--delta`, `--stub-unlinkable`,
-     *  `--base-dir`, `--module`, `--mode`, `--optimize`, `--no-optimize`,
-     *  `--compile-option` and class path entries; `--extension` is implied.
+     *  `--host-binary`, `--ext`, `--chain`, `--delta`, `--interrupt-handler`,
+     *  `--stub-unlinkable`, `--base-dir`, `--module`, `--mode`, `--optimize`,
+     *  `--no-optimize`, `--compile-option` and class path entries;
+     *  `--extension` is implied.
      */
     def parse(args: Seq[String], logger: Logger): Either[String, Request] = {
       var manifest: Option[Path] = None
@@ -274,6 +279,7 @@ object ExtensionLinker {
       val roots = mutable.ArrayBuffer.empty[Path]
       val chain = mutable.ArrayBuffer.empty[Path]
       var delta: Option[Path] = None
+      var handler: Option[String] = None
       var baseDir: Path = Paths.get(".").toAbsolutePath()
       var module = "out"
       var mode: Option[Mode] = None
@@ -291,10 +297,12 @@ object ExtensionLinker {
         case "--ext" :: e :: rest         => roots += path(e); loop(rest)
         case "--chain" :: d :: rest       => chain += path(d); loop(rest)
         case "--delta" :: d :: rest       => delta = Some(path(d)); loop(rest)
-        case "--stub-unlinkable" :: rest  => stubUnlinkable = true; loop(rest)
-        case "--base-dir" :: d :: rest    => baseDir = path(d); loop(rest)
-        case "--module" :: m :: rest      => module = m; loop(rest)
-        case "--mode" :: m :: rest        =>
+        case "--interrupt-handler" :: h :: rest =>
+          handler = Some(h); loop(rest)
+        case "--stub-unlinkable" :: rest => stubUnlinkable = true; loop(rest)
+        case "--base-dir" :: d :: rest   => baseDir = path(d); loop(rest)
+        case "--module" :: m :: rest     => module = m; loop(rest)
+        case "--mode" :: m :: rest       =>
           mode = scala.util.Try(Mode(m)).toOption
           if (mode.isEmpty) Some(s"unknown mode $m") else loop(rest)
         case "--optimize" :: rest            => optimize = true; loop(rest)
@@ -335,6 +343,7 @@ object ExtensionLinker {
                   optimize = optimize,
                   chain = chain.toList,
                   delta = delta,
+                  interruptHandler = handler,
                   compileOptions = compileOptions.toList,
                   logger = logger,
                   stubUnlinkable = stubUnlinkable

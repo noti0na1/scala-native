@@ -13,8 +13,8 @@ import scala.scalanative.live.Manifest
 /** The boundary between host and extension in generated code. A host link
  *  writes the list of symbols its binary exports and the manifest that
  *  extensions link against. An extension link checks that the host exports
- *  every host symbol its code uses and declares those symbols; it also writes
- *  its delta (`LiveDelta`).
+ *  every host symbol its code uses and declares those symbols; it also adds
+ *  interrupt polls (`LiveInterrupts`) and writes its delta (`LiveDelta`).
  */
 private[scalanative] object LiveBoundary {
   private implicit val pos: nir.SourcePosition = nir.SourcePosition.NoPosition
@@ -310,7 +310,7 @@ private[scalanative] object LiveBoundary {
       meta: Metadata
   ): Seq[nir.Defn] = meta.live match {
     case ext: LiveMetadata.Extension =>
-      checkExtension(ext, defns, lowered = false)
+      checkExtension(ext, LiveInterrupts(ext, defns), lowered = false)
     case host: LiveMetadata.Host => defns ++ host.stubDefns
     case _                       => defns
   }

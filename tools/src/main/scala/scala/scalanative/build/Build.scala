@@ -225,7 +225,8 @@ object Build {
     )
     val entries = logger.time("Extension entries") {
       ScalaNative.entries(extConfig) ++
-        scala.scalanative.live.LiveLink.extensionEntries(extConfig, ext)
+        scala.scalanative.live.LiveLink.extensionEntries(extConfig, ext) ++
+        scala.scalanative.codegen.LiveInterrupts.handler(ext)
     }
     (extConfig, hostBinary, ScalaNative.link(extConfig, entries))
   }
